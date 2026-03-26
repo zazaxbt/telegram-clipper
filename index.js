@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
+const youtubedl = require("youtube-dl-exec");
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const TEMP_DIR = path.join(__dirname, "temp");
@@ -95,7 +96,7 @@ bot.on("document", async (msg) => {
   }
 });
 
-// Handle video URLs
+// Handle direct video URLs
 bot.onText(/^(https?:\/\/\S+\.(mp4|mkv|avi|mov|webm)(\?\S*)?)$/i, async (msg, match) => {
   const chatId = msg.chat.id;
   const url = match[1];
@@ -103,6 +104,25 @@ bot.onText(/^(https?:\/\/\S+\.(mp4|mkv|avi|mov|webm)(\?\S*)?)$/i, async (msg, ma
   try {
     bot.sendMessage(chatId, "⬇️ Downloading video from URL...");
     const filePath = await downloadFromUrl(url, chatId);
+    sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
+    bot.sendMessage(
+      chatId,
+      "✅ Video downloaded! Send /clip to auto-detect best moments, or /cut HH:MM:SS HH:MM:SS for manual cut."
+    );
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
+  }
+});
+
+// Handle YouTube, Twitter/X, Instagram, TikTok, and other social media URLs
+const socialPattern = /^(https?:\/\/\S*(youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|tiktok\.com|facebook\.com|fb\.watch|vimeo\.com|reddit\.com|twitch\.tv)\S*)$/i;
+bot.onText(socialPattern, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const url = match[1];
+
+  try {
+    bot.sendMessage(chatId, "⬇️ Downloading video from social media...");
+    const filePath = await downloadWithYtdlp(url, chatId);
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
     bot.sendMessage(
       chatId,
@@ -265,6 +285,22 @@ async function downloadWithGramJS(msg) {
     throw new Error("GramJS download failed");
   }
 
+  return dest;
+}
+
+async function downloadWithYtdlp(url, chatId) {
+  const dest = path.join(TEMP_DIR, `${Date.now()}_${chatId}.mp4`);
+  await youtubedl(url, {
+    output: dest,
+    format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    mergeOutputFormat: "mp4",
+    noCheckCertificates: true,
+    noWarnings: true,
+  });
+
+  if (!fs.existsSync(dest)) {
+    throw new Error("yt-dlp download failed");
+  }
   return dest;
 }
 
