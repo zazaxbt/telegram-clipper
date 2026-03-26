@@ -226,7 +226,15 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
 
     // Transcribe with timestamps using Python whisper
     bot.sendMessage(chatId, "📊 Step 2/3: Running AI transcription (this is the slow part)...");
-    const chunks = await transcribeWithWhisper(wavPath);
+    const progressInterval = setInterval(() => {
+      bot.sendMessage(chatId, "⏳ Still transcribing... hang tight.");
+    }, 2 * 60 * 1000);
+    let chunks;
+    try {
+      chunks = await transcribeWithWhisper(wavPath);
+    } finally {
+      clearInterval(progressInterval);
+    }
 
     fs.unlinkSync(wavPath);
 
@@ -354,7 +362,7 @@ async function downloadWithGramJS(msg) {
   return dest;
 }
 
-function transcribeWithWhisper(wavPath) {
+function transcribeWithWhisper(wavPath, timeoutMs = 15 * 60 * 1000) {
   return new Promise((resolve, reject) => {
     const proc = spawn("python3", [path.join(__dirname, "transcribe.py"), wavPath], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -362,10 +370,16 @@ function transcribeWithWhisper(wavPath) {
     let stdout = "";
     let stderr = "";
 
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new Error("Transcription timed out after 15 minutes"));
+    }, timeoutMs);
+
     proc.stdout.on("data", (data) => { stdout += data.toString(); });
     proc.stderr.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", (code) => {
+      clearTimeout(timer);
       if (code !== 0) return reject(new Error(`Transcription failed: ${stderr}`));
       try {
         const chunks = JSON.parse(stdout);
@@ -375,7 +389,10 @@ function transcribeWithWhisper(wavPath) {
       }
     });
 
-    proc.on("error", reject);
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
