@@ -150,12 +150,13 @@ bot.onText(/\/duration\s+(\d+)/, (msg, match) => {
 });
 
 // Auto clip
-bot.onText(/\/clip$/, async (msg) => {
+bot.onText(/\/clip(?:\s+(\d+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
   if (!session || !session.videoPath) {
     return bot.sendMessage(chatId, "Send a video first.");
   }
+  if (match[1]) session.clipDuration = parseInt(match[1]);
 
   try {
     bot.sendMessage(chatId, "🔍 Analyzing video for interesting moments...");
