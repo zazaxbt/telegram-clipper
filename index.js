@@ -444,9 +444,9 @@ async function downloadWithYtdlp(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
 
-  // 3 minute timeout for downloads
+  // 5 minute timeout for downloads
   const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("Download timed out after 3 minutes")), 3 * 60 * 1000)
+    setTimeout(() => reject(new Error("Download timed out after 5 minutes")), 5 * 60 * 1000)
   );
 
   const download = youtubedl(url, {
@@ -455,6 +455,7 @@ async function downloadWithYtdlp(url, chatId) {
     mergeOutputFormat: "mp4",
     noCheckCertificates: true,
     noWarnings: true,
+    concurrentFragments: 4,
   });
 
   await Promise.race([download, timeout]);
@@ -638,13 +639,24 @@ function scoreSegments(scenes, audioPeaks, totalDuration, clipCount, clipDuratio
 
 function cutVideo(inputPath, start, end, outputPath) {
   return new Promise((resolve, reject) => {
+    // Try stream copy first (instant, no re-encoding)
     ffmpeg(inputPath)
       .setStartTime(start)
       .setDuration(end - start)
       .output(outputPath)
-      .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "fast"])
+      .outputOptions(["-c", "copy", "-avoid_negative_ts", "make_zero"])
       .on("end", resolve)
-      .on("error", reject)
+      .on("error", () => {
+        // Fallback to re-encode if copy fails
+        ffmpeg(inputPath)
+          .setStartTime(start)
+          .setDuration(end - start)
+          .output(outputPath)
+          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+          .on("end", resolve)
+          .on("error", reject)
+          .run();
+      })
       .run();
   });
 }
