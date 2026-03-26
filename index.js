@@ -167,8 +167,11 @@ bot.onText(/\/clip(?:\s+(\d+))?$/, async (msg, match) => {
   try {
     bot.sendMessage(chatId, "🔍 Analyzing video for interesting moments...");
 
+    bot.sendMessage(chatId, "📊 Step 1/3: Detecting scene changes...");
     const scenes = await detectScenes(session.videoPath);
+    bot.sendMessage(chatId, `📊 Step 2/3: Analyzing audio peaks... (found ${scenes.length} scenes)`);
     const audioPeaks = await detectAudioPeaks(session.videoPath);
+    bot.sendMessage(chatId, `📊 Step 3/3: Scoring highlights... (found ${audioPeaks.length} audio peaks)`);
     const duration = await getVideoDuration(session.videoPath);
 
     // Merge scene changes and audio peaks into scored segments
@@ -212,18 +215,23 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
   const clipDuration = match[1] ? parseInt(match[1]) : session.clipDuration;
 
   try {
-    bot.sendMessage(chatId, "🎙️ Transcribing video... this may take a while.");
+    const videoDuration = await getVideoDuration(session.videoPath);
+    const estMinutes = Math.ceil(videoDuration / 60);
+    bot.sendMessage(chatId, `🎙️ Transcribing video (~${estMinutes} min video)...\n⏳ Estimated time: ${estMinutes}-${estMinutes * 2} minutes`);
 
     // Extract audio as WAV for Whisper
+    bot.sendMessage(chatId, "📊 Step 1/3: Extracting audio...");
     const wavPath = path.join(TEMP_DIR, `audio_${chatId}.wav`);
     await extractAudio(session.videoPath, wavPath);
 
     // Transcribe with timestamps using Python whisper
+    bot.sendMessage(chatId, "📊 Step 2/3: Running AI transcription (this is the slow part)...");
     const chunks = await transcribeWithWhisper(wavPath);
 
     fs.unlinkSync(wavPath);
 
     // Find questions in the transcript
+    bot.sendMessage(chatId, `📊 Step 3/3: Found ${chunks.length} text segments. Searching for Q&A moments...`);
     const qaClips = extractQASegments(chunks, clipDuration);
 
     if (qaClips.length === 0) {
