@@ -9,7 +9,7 @@ const path = require("path");
 const https = require("https");
 const http = require("http");
 const youtubedl = require("youtube-dl-exec");
-const { pipeline } = require("@xenova/transformers");
+const { spawn } = require("child_process");
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const TEMP_DIR = path.join(__dirname, "temp");
@@ -43,16 +43,7 @@ async function initGramClient() {
 
 initGramClient().catch((err) => console.error("GramJS init failed:", err.message));
 
-// Whisper model for transcription
-let whisperPipeline = null;
-async function initWhisper() {
-  console.log("Loading Whisper model (this may take a minute on first run)...");
-  whisperPipeline = await pipeline("automatic-speech-recognition", "Xenova/whisper-small", {
-    quantized: true,
-  });
-  console.log("✅ Whisper model loaded");
-}
-initWhisper().catch((err) => console.error("Whisper init failed:", err.message));
+// Whisper transcription via Python (lightweight, runs on demand)
 
 // Track user sessions
 const sessions = {};
@@ -218,10 +209,6 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
     return bot.sendMessage(chatId, "Send a video first.");
   }
 
-  if (!whisperPipeline) {
-    return bot.sendMessage(chatId, "⏳ Whisper model still loading, try again in a moment.");
-  }
-
   const clipDuration = match[1] ? parseInt(match[1]) : session.clipDuration;
 
   try {
@@ -231,17 +218,13 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
     const wavPath = path.join(TEMP_DIR, `audio_${chatId}.wav`);
     await extractAudio(session.videoPath, wavPath);
 
-    // Transcribe with timestamps
-    const transcription = await whisperPipeline(wavPath, {
-      return_timestamps: true,
-      chunk_length_s: 30,
-      stride_length_s: 5,
-    });
+    // Transcribe with timestamps using Python whisper
+    const chunks = await transcribeWithWhisper(wavPath);
 
     fs.unlinkSync(wavPath);
 
     // Find questions in the transcript
-    const qaClips = extractQASegments(transcription.chunks, clipDuration);
+    const qaClips = extractQASegments(chunks, clipDuration);
 
     if (qaClips.length === 0) {
       return bot.sendMessage(chatId, "No questions detected in the video. Try /clip for auto-highlights instead.");
@@ -361,6 +344,31 @@ async function downloadWithGramJS(msg) {
   }
 
   return dest;
+}
+
+function transcribeWithWhisper(wavPath) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("python3", [path.join(__dirname, "transcribe.py"), wavPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (data) => { stdout += data.toString(); });
+    proc.stderr.on("data", (data) => { stderr += data.toString(); });
+
+    proc.on("close", (code) => {
+      if (code !== 0) return reject(new Error(`Transcription failed: ${stderr}`));
+      try {
+        const chunks = JSON.parse(stdout);
+        resolve(chunks);
+      } catch {
+        reject(new Error("Failed to parse transcription output"));
+      }
+    });
+
+    proc.on("error", reject);
+  });
 }
 
 function extractAudio(videoPath, wavPath) {
