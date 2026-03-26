@@ -435,7 +435,7 @@ async function downloadWithYtdlp(url, chatId) {
 
   const download = youtubedl(url, {
     output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    format: "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
+    format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     mergeOutputFormat: "mp4",
     noCheckCertificates: true,
     noWarnings: true,
