@@ -9,6 +9,7 @@ const path = require("path");
 const https = require("https");
 const http = require("http");
 const youtubedl = require("youtube-dl-exec");
+const { pipeline } = require("@xenova/transformers");
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const TEMP_DIR = path.join(__dirname, "temp");
@@ -42,6 +43,17 @@ async function initGramClient() {
 
 initGramClient().catch((err) => console.error("GramJS init failed:", err.message));
 
+// Whisper model for transcription
+let whisperPipeline = null;
+async function initWhisper() {
+  console.log("Loading Whisper model (this may take a minute on first run)...");
+  whisperPipeline = await pipeline("automatic-speech-recognition", "Xenova/whisper-small", {
+    quantized: true,
+  });
+  console.log("✅ Whisper model loaded");
+}
+initWhisper().catch((err) => console.error("Whisper init failed:", err.message));
+
 // Track user sessions
 const sessions = {};
 
@@ -52,9 +64,12 @@ bot.onText(/\/start/, (msg) => {
       `Send me a video (upload or URL) and I'll find the best clips automatically!\n\n` +
       `*Commands:*\n` +
       `/clip - Auto-detect and cut best clips\n` +
+      `/clip 60 - Auto-clip with custom duration\n` +
+      `/qaclip - Find Q&A moments and clip answers with question as caption\n` +
       `/cut HH:MM:SS HH:MM:SS - Manual cut with start & end time\n` +
       `/clips N - Set number of auto clips (default: 3)\n` +
-      `/duration N - Set max clip duration in seconds (default: 30)`,
+      `/duration N - Set max clip duration in seconds (default: 30)\n\n` +
+      `Also supports YouTube, Twitter/X, Instagram, TikTok links!`,
     { parse_mode: "Markdown" }
   );
 });
@@ -195,6 +210,65 @@ bot.onText(/\/clip(?:\s+(\d+))?$/, async (msg, match) => {
   }
 });
 
+// Q&A clip — transcribe, find questions, clip answers with question as caption
+bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) {
+    return bot.sendMessage(chatId, "Send a video first.");
+  }
+
+  if (!whisperPipeline) {
+    return bot.sendMessage(chatId, "⏳ Whisper model still loading, try again in a moment.");
+  }
+
+  const clipDuration = match[1] ? parseInt(match[1]) : session.clipDuration;
+
+  try {
+    bot.sendMessage(chatId, "🎙️ Transcribing video... this may take a while.");
+
+    // Extract audio as WAV for Whisper
+    const wavPath = path.join(TEMP_DIR, `audio_${chatId}.wav`);
+    await extractAudio(session.videoPath, wavPath);
+
+    // Transcribe with timestamps
+    const transcription = await whisperPipeline(wavPath, {
+      return_timestamps: true,
+      chunk_length_s: 30,
+      stride_length_s: 5,
+    });
+
+    fs.unlinkSync(wavPath);
+
+    // Find questions in the transcript
+    const qaClips = extractQASegments(transcription.chunks, clipDuration);
+
+    if (qaClips.length === 0) {
+      return bot.sendMessage(chatId, "No questions detected in the video. Try /clip for auto-highlights instead.");
+    }
+
+    bot.sendMessage(chatId, `❓ Found ${qaClips.length} Q&A moment(s). Cutting clips...`);
+
+    for (let i = 0; i < qaClips.length; i++) {
+      const { question, start, end } = qaClips[i];
+      const outPath = path.join(TEMP_DIR, `qa_${chatId}_${i}.mp4`);
+
+      await cutVideo(session.videoPath, start, end, outPath);
+
+      const caption = `❓ ${question}\n\n🎬 Clip ${i + 1}/${qaClips.length} (${formatTime(start)} → ${formatTime(end)})`;
+      await bot.sendVideo(chatId, outPath, {
+        caption: caption.slice(0, 1024), // Telegram caption limit
+      });
+
+      fs.unlinkSync(outPath);
+    }
+
+    bot.sendMessage(chatId, "✅ All Q&A clips sent!");
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
 // Manual cut
 bot.onText(/\/cut\s+(\S+)\s+(\S+)/, async (msg, match) => {
   const chatId = msg.chat.id;
@@ -287,6 +361,67 @@ async function downloadWithGramJS(msg) {
   }
 
   return dest;
+}
+
+function extractAudio(videoPath, wavPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(videoPath)
+      .output(wavPath)
+      .outputOptions(["-ar", "16000", "-ac", "1", "-f", "wav"])
+      .on("end", resolve)
+      .on("error", reject)
+      .run();
+  });
+}
+
+function extractQASegments(chunks, maxClipDuration) {
+  const qaClips = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const text = chunks[i].text.trim();
+
+    // Detect questions
+    if (text.includes("?")) {
+      const question = text;
+      const questionStart = chunks[i].timestamp[0];
+
+      // The answer is everything after the question until the next question or maxClipDuration
+      const answerStart = chunks[i].timestamp[1] || chunks[i].timestamp[0];
+      let answerEnd = answerStart + maxClipDuration;
+
+      // Collect answer text from following chunks
+      for (let j = i + 1; j < chunks.length; j++) {
+        const nextText = chunks[j].text.trim();
+        const nextEnd = chunks[j].timestamp[1] || chunks[j].timestamp[0];
+
+        // Stop if we hit another question or exceed duration
+        if (nextText.includes("?") || nextEnd - questionStart > maxClipDuration) {
+          answerEnd = nextEnd;
+          break;
+        }
+        answerEnd = nextEnd;
+      }
+
+      // Clip starts a bit before the question for context
+      const clipStart = Math.max(0, questionStart - 1);
+      const clipEnd = Math.min(answerEnd, clipStart + maxClipDuration);
+
+      qaClips.push({
+        question: question,
+        start: clipStart,
+        end: clipEnd,
+      });
+    }
+  }
+
+  // Remove overlapping clips
+  const filtered = [];
+  for (const clip of qaClips) {
+    const overlaps = filtered.some(c => clip.start < c.end && clip.end > c.start);
+    if (!overlaps) filtered.push(clip);
+  }
+
+  return filtered;
 }
 
 async function downloadWithYtdlp(url, chatId) {
