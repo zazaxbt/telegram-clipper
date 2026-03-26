@@ -237,42 +237,35 @@ async function downloadWithGramJS(msg) {
 
   const dest = path.join(TEMP_DIR, `${Date.now()}_large.mp4`);
 
-  // Get the message via GramJS to access the media
-  const result = await gramClient.invoke(
-    new Api.channels.GetMessages({
-      channel: msg.chat.id,
-      id: [new Api.InputMessageID({ id: msg.message_id })],
-    }).catch(() => null)
-  );
+  // Fetch the message through GramJS to access media
+  let gramMessage = null;
 
-  // Download using iterDownload for large files
-  const buffer = await gramClient.downloadMedia(msg._gramMessage || await getGramMessage(msg), {
-    outputFile: dest,
-  });
+  try {
+    const messages = await gramClient.getMessages(msg.chat.id, {
+      ids: [msg.message_id],
+    });
+    if (messages && messages.length > 0) gramMessage = messages[0];
+  } catch {
+    try {
+      const messages = await gramClient.getMessages(
+        new Api.PeerUser({ userId: msg.chat.id }),
+        { ids: [msg.message_id] }
+      );
+      if (messages && messages.length > 0) gramMessage = messages[0];
+    } catch {}
+  }
+
+  if (!gramMessage) {
+    throw new Error("Could not fetch message for large file download");
+  }
+
+  await gramClient.downloadMedia(gramMessage, { outputFile: dest });
 
   if (!fs.existsSync(dest)) {
     throw new Error("GramJS download failed");
   }
 
   return dest;
-}
-
-async function getGramMessage(botMsg) {
-  // Fetch the message through GramJS using the chat and message ID
-  try {
-    const messages = await gramClient.getMessages(botMsg.chat.id, {
-      ids: [botMsg.message_id],
-    });
-    if (messages && messages.length > 0) return messages[0];
-  } catch {
-    // For private chats, try with peer
-    const messages = await gramClient.getMessages(
-      new Api.PeerUser({ userId: botMsg.chat.id }),
-      { ids: [botMsg.message_id] }
-    );
-    if (messages && messages.length > 0) return messages[0];
-  }
-  throw new Error("Could not fetch message for large file download");
 }
 
 function downloadFromUrl(url, chatId) {
