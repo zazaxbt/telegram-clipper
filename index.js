@@ -427,13 +427,21 @@ function extractQASegments(chunks, maxClipDuration) {
 async function downloadWithYtdlp(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
-  await youtubedl(url, {
+
+  // 3 minute timeout for downloads
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("Download timed out after 3 minutes")), 3 * 60 * 1000)
+  );
+
+  const download = youtubedl(url, {
     output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    format: "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
     mergeOutputFormat: "mp4",
     noCheckCertificates: true,
     noWarnings: true,
   });
+
+  await Promise.race([download, timeout]);
 
   // yt-dlp may save with a slightly different name, find the actual file
   if (fs.existsSync(dest)) return dest;
@@ -645,9 +653,19 @@ function formatTime(seconds) {
 
 // Health endpoint for Render free tier
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   res.writeHead(200);
   res.end("Telegram Clipper Bot is running");
-}).listen(PORT, () => {
+});
+server.listen(PORT, () => {
   console.log(`🎬 Telegram Clipper Bot is running! (health check on port ${PORT})`);
+
+  // Self-ping every 14 minutes to prevent Render free tier from sleeping
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+  if (RENDER_URL) {
+    setInterval(() => {
+      https.get(RENDER_URL, () => {}).on("error", () => {});
+    }, 14 * 60 * 1000);
+    console.log("🏓 Self-ping enabled — bot will stay awake");
+  }
 });
