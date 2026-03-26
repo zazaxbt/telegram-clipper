@@ -290,19 +290,27 @@ async function downloadWithGramJS(msg) {
 }
 
 async function downloadWithYtdlp(url, chatId) {
-  const dest = path.join(TEMP_DIR, `${Date.now()}_${chatId}.mp4`);
+  const basename = `${Date.now()}_${chatId}`;
+  const dest = path.join(TEMP_DIR, `${basename}.mp4`);
   await youtubedl(url, {
-    output: dest,
+    output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
     format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     mergeOutputFormat: "mp4",
     noCheckCertificates: true,
     noWarnings: true,
   });
 
-  if (!fs.existsSync(dest)) {
-    throw new Error("yt-dlp download failed");
+  // yt-dlp may save with a slightly different name, find the actual file
+  if (fs.existsSync(dest)) return dest;
+
+  const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(basename));
+  if (files.length > 0) {
+    const actual = path.join(TEMP_DIR, files[0]);
+    if (actual !== dest) fs.renameSync(actual, dest);
+    return dest;
   }
-  return dest;
+
+  throw new Error("yt-dlp download failed");
 }
 
 function downloadFromUrl(url, chatId) {
