@@ -517,9 +517,10 @@ function getVideoDuration(filePath) {
 function detectScenes(filePath) {
   return new Promise((resolve, reject) => {
     const scenes = [];
+    // Speed up: only analyze 1 frame per second instead of every frame
     const args = [
       "-i", filePath,
-      "-vf", "select='gt(scene,0.3)',showinfo",
+      "-vf", "fps=1,select='gt(scene,0.3)',showinfo",
       "-vsync", "vfr",
       "-f", "null",
       "-"
@@ -529,9 +530,16 @@ function detectScenes(filePath) {
     const proc = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
     let stderr = "";
 
+    // Timeout after 2 minutes
+    const timeout = setTimeout(() => {
+      proc.kill();
+      resolve(scenes); // Return whatever we found so far
+    }, 2 * 60 * 1000);
+
     proc.stderr.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", () => {
+      clearTimeout(timeout);
       const regex = /pts_time:(\d+\.?\d*)/g;
       let match;
       while ((match = regex.exec(stderr)) !== null) {
@@ -540,14 +548,16 @@ function detectScenes(filePath) {
       resolve(scenes);
     });
 
-    proc.on("error", reject);
+    proc.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
   });
 }
 
 function detectAudioPeaks(filePath) {
   return new Promise((resolve, reject) => {
     const { spawn } = require("child_process");
-    // Get volume levels per second
     const args = [
       "-i", filePath,
       "-af", "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
@@ -559,10 +569,17 @@ function detectAudioPeaks(filePath) {
     let stdout = "";
     let stderr = "";
 
+    // Timeout after 2 minutes
+    const timeout = setTimeout(() => {
+      proc.kill();
+      resolve([]);
+    }, 2 * 60 * 1000);
+
     proc.stdout.on("data", (data) => { stdout += data.toString(); });
     proc.stderr.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", () => {
+      clearTimeout(timeout);
       const peaks = [];
       const lines = stdout.split("\n");
       let frameTime = 0;
@@ -574,18 +591,20 @@ function detectAudioPeaks(filePath) {
         const rmsMatch = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?\d+\.?\d*)/);
         if (rmsMatch) {
           const rms = parseFloat(rmsMatch[1]);
-          if (rms > -30) { // Louder than -30dB = interesting
+          if (rms > -30) {
             peaks.push({ time: frameTime, level: rms });
           }
         }
       }
 
-      // Sort by loudness, take top moments
       peaks.sort((a, b) => b.level - a.level);
       resolve(peaks);
     });
 
-    proc.on("error", reject);
+    proc.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
   });
 }
 
