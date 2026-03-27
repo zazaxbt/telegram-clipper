@@ -557,7 +557,7 @@ async function downloadWithYtdlp(url, chatId) {
 
   // 5 minute timeout for downloads
   const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("Download timed out after 5 minutes")), 5 * 60 * 1000)
+    setTimeout(() => reject(new Error("Download timed out after 15 minutes")), 15 * 60 * 1000)
   );
 
   const ytdlpOpts = {
