@@ -590,28 +590,40 @@ function detectAudioPeaks(filePath) {
 }
 
 function scoreSegments(scenes, audioPeaks, totalDuration, clipCount, clipDuration) {
+  const MAX_DURATION = 60; // never exceed 1 minute
   const segments = [];
 
-  // Create candidate segments around scene changes
-  for (const sceneTime of scenes) {
-    const start = Math.max(0, sceneTime - 2);
-    const end = Math.min(totalDuration, sceneTime + clipDuration);
+  // Sort scenes chronologically
+  const sortedScenes = [...scenes].sort((a, b) => a - b);
+
+  // Create candidate segments — each clip starts at a scene change and ends at the next one
+  for (let i = 0; i < sortedScenes.length; i++) {
+    const start = Math.max(0, sortedScenes[i] - 2);
+    // Find next scene change for natural end point
+    const nextScene = sortedScenes[i + 1] || sortedScenes[i] + 15;
+    // Dynamic duration: use distance to next scene, but cap at MAX_DURATION
+    const naturalEnd = Math.min(nextScene + 2, start + MAX_DURATION, totalDuration);
+    // Minimum 5 seconds
+    const end = Math.max(naturalEnd, start + 5);
+
     let score = 1;
 
     // Boost score if audio peaks are nearby
     for (const peak of audioPeaks) {
       if (peak.time >= start && peak.time <= end) {
-        score += (peak.level + 50) / 10; // Normalize score
+        score += (peak.level + 50) / 10;
       }
     }
 
     segments.push({ start, end, score });
   }
 
-  // Also add segments around top audio peaks
+  // Also add segments around top audio peaks with dynamic duration
   for (const peak of audioPeaks.slice(0, 10)) {
     const start = Math.max(0, peak.time - 5);
-    const end = Math.min(totalDuration, peak.time + clipDuration - 5);
+    // Find nearest scene change after peak for natural end
+    const nextScene = sortedScenes.find(s => s > peak.time) || peak.time + 20;
+    const end = Math.min(nextScene + 2, start + MAX_DURATION, totalDuration);
     const score = (peak.level + 50) / 5;
     segments.push({ start, end, score });
   }
@@ -621,7 +633,7 @@ function scoreSegments(scenes, audioPeaks, totalDuration, clipCount, clipDuratio
     const segLen = totalDuration / clipCount;
     for (let i = 0; i < clipCount; i++) {
       const start = i * segLen;
-      const end = Math.min(start + clipDuration, totalDuration);
+      const end = Math.min(start + Math.min(segLen, MAX_DURATION), totalDuration);
       segments.push({ start, end, score: 1 });
     }
   }
