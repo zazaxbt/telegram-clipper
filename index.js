@@ -449,7 +449,7 @@ async function downloadWithYtdlp(url, chatId) {
     setTimeout(() => reject(new Error("Download timed out after 5 minutes")), 5 * 60 * 1000)
   );
 
-  const download = youtubedl(url, {
+  const ytdlpOpts = {
     output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
     format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     mergeOutputFormat: "mp4",
@@ -458,7 +458,15 @@ async function downloadWithYtdlp(url, chatId) {
     concurrentFragments: 4,
     extractorArgs: "youtube:player_client=ios,web",
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  });
+  };
+
+  // Use cookies if available
+  const cookiesPath = path.join(__dirname, "cookies.txt");
+  if (fs.existsSync(cookiesPath)) {
+    ytdlpOpts.cookies = cookiesPath;
+  }
+
+  const download = youtubedl(url, ytdlpOpts);
 
   await Promise.race([download, timeout]);
 
