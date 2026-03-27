@@ -170,6 +170,31 @@ bot.onText(/\/duration\s+(\d+)/, (msg, match) => {
   bot.sendMessage(chatId, `✅ Max clip duration set to ${match[1]}s.`);
 });
 
+// Animated progress helpers
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const LOADING_BAR = ['▱▱▱▱▱', '▰▱▱▱▱', '▰▰▱▱▱', '▰▰▰▱▱', '▰▰▰▰▱', '▰▰▰▰▰'];
+const FILM_FRAMES = ['🎬', '🎥', '📽️', '🎞️'];
+
+function createProgressBar(percent) {
+  const filled = Math.round(percent / 10);
+  const empty = 10 - filled;
+  return '▰'.repeat(filled) + '▱'.repeat(empty) + ` ${percent}%`;
+}
+
+// Start an animated spinner that updates the message
+function startSpinner(chatId, msgId, getText) {
+  let frame = 0;
+  const interval = setInterval(async () => {
+    const spinner = SPINNER[frame % SPINNER.length];
+    const film = FILM_FRAMES[frame % FILM_FRAMES.length];
+    try {
+      await bot.editMessageText(getText(spinner, film), { chat_id: chatId, message_id: msgId });
+    } catch {}
+    frame++;
+  }, 2000);
+  return interval;
+}
+
 // Helper to update a progress message
 async function updateProgress(chatId, msgId, text) {
   try {
@@ -191,46 +216,65 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
     const duration = await getVideoDuration(session.videoPath);
     const durationStr = formatTime(duration);
     const statusMsg = await bot.sendMessage(chatId,
-      `🔍 Analyzing ${durationStr} video...\n\n` +
-      `⬜⬜⬜⬜⬜ 0%\n` +
-      `Step 1/4: Detecting scene changes...`
+      `🎬 Analyzing ${durationStr} video...\n\n` +
+      `${createProgressBar(0)}\n\n` +
+      `⠋ Step 1/4: Detecting scene changes...`
     );
     const mid = statusMsg.message_id;
 
+    // Animated spinner during scene detection
+    let spinnerAnim = startSpinner(chatId, mid, (s, f) =>
+      `${f} Analyzing ${durationStr} video...\n\n` +
+      `${createProgressBar(10)}\n\n` +
+      `${s} Detecting scene changes...`
+    );
+
     const startTime = Date.now();
     const scenes = await detectScenes(session.videoPath);
+    clearInterval(spinnerAnim);
     const sceneTime = ((Date.now() - startTime) / 1000).toFixed(0);
+
     await updateProgress(chatId, mid,
-      `🔍 Analyzing ${durationStr} video...\n\n` +
-      `🟩🟩⬜⬜⬜ 40%\n` +
-      `✅ Scene detection: ${scenes.length} scenes (${sceneTime}s)\n` +
-      `Step 2/4: Analyzing audio peaks...`
+      `🎬 Analyzing ${durationStr} video...\n\n` +
+      `${createProgressBar(40)}\n\n` +
+      `✅ Scenes: ${scenes.length} found (${sceneTime}s)\n` +
+      `⠋ Analyzing audio peaks...`
+    );
+
+    // Animated spinner during audio analysis
+    spinnerAnim = startSpinner(chatId, mid, (s, f) =>
+      `${f} Analyzing ${durationStr} video...\n\n` +
+      `${createProgressBar(60)}\n\n` +
+      `✅ Scenes: ${scenes.length} found (${sceneTime}s)\n` +
+      `${s} Analyzing audio peaks...`
     );
 
     const audioStart = Date.now();
     const audioPeaks = await detectAudioPeaks(session.videoPath);
+    clearInterval(spinnerAnim);
     const audioTime = ((Date.now() - audioStart) / 1000).toFixed(0);
+
     await updateProgress(chatId, mid,
-      `🔍 Analyzing ${durationStr} video...\n\n` +
-      `🟩🟩🟩🟩⬜ 80%\n` +
-      `✅ Scene detection: ${scenes.length} scenes (${sceneTime}s)\n` +
-      `✅ Audio analysis: ${audioPeaks.length} peaks (${audioTime}s)\n` +
-      `Step 3/4: Scoring highlights...`
+      `🎬 Analyzing ${durationStr} video...\n\n` +
+      `${createProgressBar(80)}\n\n` +
+      `✅ Scenes: ${scenes.length} found (${sceneTime}s)\n` +
+      `✅ Audio: ${audioPeaks.length} peaks (${audioTime}s)\n` +
+      `⠹ Scoring highlights...`
     );
 
     const highlights = scoreSegments(scenes, audioPeaks, duration, session.clipCount, session.clipDuration);
 
     if (highlights.length === 0) {
-      return updateProgress(chatId, mid, "❌ Couldn't detect interesting moments. Try /cut manually.");
+      return updateProgress(chatId, mid, "❌ No highlights found. Try /cut manually.");
     }
 
     await updateProgress(chatId, mid,
-      `🔍 Analyzing ${durationStr} video...\n\n` +
-      `🟩🟩🟩🟩🟩 100%\n` +
-      `✅ Scene detection: ${scenes.length} scenes (${sceneTime}s)\n` +
-      `✅ Audio analysis: ${audioPeaks.length} peaks (${audioTime}s)\n` +
-      `✅ Found ${highlights.length} highlight(s)\n\n` +
-      `✂️ Cutting & sending clips...`
+      `🎬 Analysis complete!\n\n` +
+      `${createProgressBar(100)}\n\n` +
+      `✅ Scenes: ${scenes.length} found (${sceneTime}s)\n` +
+      `✅ Audio: ${audioPeaks.length} peaks (${audioTime}s)\n` +
+      `✅ ${highlights.length} highlight(s) found\n\n` +
+      `✂️ Cutting clips...`
     );
 
     for (let i = 0; i < highlights.length; i++) {
@@ -238,9 +282,12 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
       const clipDur = (end - start).toFixed(0);
       const outPath = path.join(TEMP_DIR, `clip_${chatId}_${i}.mp4`);
 
+      const clipBar = createProgressBar(Math.round(((i + 1) / highlights.length) * 100));
       await updateProgress(chatId, mid,
-        `✂️ Cutting clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)...\n` +
-        `${'🟩'.repeat(i + 1)}${'⬜'.repeat(highlights.length - i - 1)} ${i + 1}/${highlights.length}`
+        `✂️ Cutting & uploading...\n\n` +
+        `${clipBar}\n\n` +
+        `🎞️ Clip ${i + 1}/${highlights.length}\n` +
+        `⏱️ ${formatTime(start)} → ${formatTime(end)} (${clipDur}s)`
       );
 
       await cutVideo(session.videoPath, start, end, outPath);
@@ -254,9 +301,14 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
 
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(0);
     await updateProgress(chatId, mid,
-      `✅ Done! ${highlights.length} clips sent in ${totalTime}s\n\n` +
-      `📊 Summary:\n` +
-      highlights.map((h, i) => `  ${i + 1}. ${formatTime(h.start)} → ${formatTime(h.end)} (${(h.end - h.start).toFixed(0)}s)`).join('\n')
+      `🎉 All done!\n\n` +
+      `⏱️ Total time: ${totalTime}s\n` +
+      `🎞️ ${highlights.length} clips generated\n\n` +
+      `📊 Clip Summary:\n` +
+      highlights.map((h, i) =>
+        `  ${i + 1}. 🕐 ${formatTime(h.start)} → ${formatTime(h.end)} (${(h.end - h.start).toFixed(0)}s)`
+      ).join('\n') +
+      `\n\n💡 Send another video or /clip again!`
     );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
