@@ -76,7 +76,7 @@ bot.on("video", async (msg) => {
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
     bot.sendMessage(
       chatId,
-      "✅ Video received! Send /clip to auto-detect best moments, or /cut HH:MM:SS HH:MM:SS for manual cut."
+      "✅ Video received!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
     );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
@@ -95,7 +95,7 @@ bot.on("document", async (msg) => {
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
     bot.sendMessage(
       chatId,
-      "✅ Video received! Send /clip to auto-detect best moments, or /cut HH:MM:SS HH:MM:SS for manual cut."
+      "✅ Video received!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
     );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
@@ -113,7 +113,7 @@ bot.onText(/^(https?:\/\/\S+\.(mp4|mkv|avi|mov|webm)(\?\S*)?)$/i, async (msg, ma
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
     bot.sendMessage(
       chatId,
-      "✅ Video downloaded! Send /clip to auto-detect best moments, or /cut HH:MM:SS HH:MM:SS for manual cut."
+      "✅ Video downloaded!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
     );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
@@ -132,7 +132,7 @@ bot.onText(socialPattern, async (msg, match) => {
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
     bot.sendMessage(
       chatId,
-      "✅ Video downloaded! Send /clip to auto-detect best moments, or /cut HH:MM:SS HH:MM:SS for manual cut."
+      "✅ Video downloaded!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
     );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
@@ -140,7 +140,7 @@ bot.onText(socialPattern, async (msg, match) => {
 });
 
 // Set number of clips
-bot.onText(/\/clips\s+(\d+)/, (msg, match) => {
+bot.onText(/^\/clips\s+(\d+)/, (msg, match) => {
   const chatId = msg.chat.id;
   if (!sessions[chatId]) return bot.sendMessage(chatId, "Send a video first.");
   sessions[chatId].clipCount = parseInt(match[1]);
@@ -156,7 +156,7 @@ bot.onText(/\/duration\s+(\d+)/, (msg, match) => {
 });
 
 // Auto clip
-bot.onText(/\/clip(?:\s+(\d+))?$/, async (msg, match) => {
+bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
   if (!session || !session.videoPath) {
