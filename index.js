@@ -451,7 +451,7 @@ async function downloadWithYtdlp(url, chatId) {
 
   const ytdlpOpts = {
     output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
     mergeOutputFormat: "mp4",
     noCheckCertificates: true,
     noWarnings: true,
