@@ -733,8 +733,8 @@ function scoreSegments(scenes, audioPeaks, totalDuration, clipCount, clipDuratio
     const nextScene = sortedScenes[i + 1] || sortedScenes[i] + 15;
     // Dynamic duration: use distance to next scene, but cap at MAX_DURATION
     const naturalEnd = Math.min(nextScene + 2, start + MAX_DURATION, totalDuration);
-    // Minimum 5 seconds
-    const end = Math.max(naturalEnd, start + 5);
+    // Minimum 30 seconds
+    const end = Math.min(Math.max(naturalEnd, start + 30), start + MAX_DURATION, totalDuration);
 
     let score = 1;
 
