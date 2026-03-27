@@ -451,13 +451,11 @@ async function downloadWithYtdlp(url, chatId) {
 
   const ytdlpOpts = {
     output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+    format: "bv*+ba/b",
     mergeOutputFormat: "mp4",
     noCheckCertificates: true,
     noWarnings: true,
     concurrentFragments: 4,
-    extractorArgs: "youtube:player_client=ios,web",
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
   };
 
   // Use cookies if available
