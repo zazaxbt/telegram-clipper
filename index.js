@@ -11,7 +11,36 @@ const http = require("http");
 const youtubedl = require("youtube-dl-exec");
 const { spawn } = require("child_process");
 
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
+  polling: {
+    params: { timeout: 30 },
+    interval: 2000,
+    autoStart: false,
+  },
+});
+
+// Clear any stale polling sessions before starting
+(async () => {
+  try {
+    // Drop pending updates and clear webhook
+    await bot.deleteWebHook({ drop_pending_updates: true });
+    // Wait for old instance to fully die
+    await new Promise((r) => setTimeout(r, 5000));
+    await bot.startPolling();
+    console.log("✅ Polling started successfully");
+  } catch (err) {
+    console.error("Failed to start polling, retrying in 10s...", err.message);
+    setTimeout(async () => {
+      try {
+        await bot.deleteWebHook({ drop_pending_updates: true });
+        await bot.startPolling();
+        console.log("✅ Polling started on retry");
+      } catch (e) {
+        console.error("Polling retry failed:", e.message);
+      }
+    }, 10000);
+  }
+})();
 const TEMP_DIR = path.join(__dirname, "temp");
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
 
