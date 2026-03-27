@@ -121,7 +121,7 @@ bot.onText(/^(https?:\/\/\S+\.(mp4|mkv|avi|mov|webm)(\?\S*)?)$/i, async (msg, ma
 });
 
 // Handle YouTube, Twitter/X, Instagram, TikTok, and other social media URLs
-const socialPattern = /^(https?:\/\/\S*(youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|tiktok\.com|facebook\.com|fb\.watch|vimeo\.com|reddit\.com|twitch\.tv)\S*)$/i;
+const socialPattern = /^(https?:\/\/\S*(youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|tiktok\.com|facebook\.com|fb\.watch|vimeo\.com|reddit\.com|twitch\.tv|drive\.google\.com)\S*)$/i;
 bot.onText(socialPattern, async (msg, match) => {
   const chatId = msg.chat.id;
   const url = match[1];
