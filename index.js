@@ -65,19 +65,22 @@ bot.onText(/\/start/, (msg) => {
   );
 });
 
+const COMMANDS_TEXT = "📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration";
+
 // Handle video uploads
 bot.on("video", async (msg) => {
   const chatId = msg.chat.id;
   const fileId = msg.video.file_id;
+  const fileSize = msg.video.file_size || 0;
+  const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
 
   try {
-    bot.sendMessage(chatId, "⬇️ Downloading video...");
+    const dlMsg = await bot.sendMessage(chatId, `⬇️ Downloading video (${sizeMB} MB)...`);
+    const startTime = Date.now();
     const filePath = await downloadTelegramFile(fileId, msg);
+    const dlTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    await updateProgress(chatId, dlMsg.message_id, `✅ Video received! (${sizeMB} MB in ${dlTime}s)\n\n${COMMANDS_TEXT}`);
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
-    bot.sendMessage(
-      chatId,
-      "✅ Video received!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
-    );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
   }
@@ -88,15 +91,16 @@ bot.on("document", async (msg) => {
   const chatId = msg.chat.id;
   const mime = msg.document.mime_type || "";
   if (!mime.startsWith("video/")) return;
+  const fileSize = msg.document.file_size || 0;
+  const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
 
   try {
-    bot.sendMessage(chatId, "⬇️ Downloading video...");
+    const dlMsg = await bot.sendMessage(chatId, `⬇️ Downloading video (${sizeMB} MB)...`);
+    const startTime = Date.now();
     const filePath = await downloadTelegramFile(msg.document.file_id, msg);
+    const dlTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    await updateProgress(chatId, dlMsg.message_id, `✅ Video received! (${sizeMB} MB in ${dlTime}s)\n\n${COMMANDS_TEXT}`);
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
-    bot.sendMessage(
-      chatId,
-      "✅ Video received!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
-    );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
   }
@@ -108,13 +112,13 @@ bot.onText(/^(https?:\/\/\S+\.(mp4|mkv|avi|mov|webm)(\?\S*)?)$/i, async (msg, ma
   const url = match[1];
 
   try {
-    bot.sendMessage(chatId, "⬇️ Downloading video from URL...");
+    const dlMsg = await bot.sendMessage(chatId, "⬇️ Downloading video from URL...");
+    const startTime = Date.now();
     const filePath = await downloadFromUrl(url, chatId);
+    const dlTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    const sizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
+    await updateProgress(chatId, dlMsg.message_id, `✅ Video downloaded! (${sizeMB} MB in ${dlTime}s)\n\n${COMMANDS_TEXT}`);
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
-    bot.sendMessage(
-      chatId,
-      "✅ Video downloaded!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
-    );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
   }
@@ -127,13 +131,24 @@ bot.onText(socialPattern, async (msg, match) => {
   const url = match[1];
 
   try {
-    bot.sendMessage(chatId, "⬇️ Downloading video from social media...");
+    const dlMsg = await bot.sendMessage(chatId, "⬇️ Downloading video from social media...\n⏳ This may take a moment...");
+    const startTime = Date.now();
+
+    // Update progress every 10 seconds
+    const progressInterval = setInterval(async () => {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      try {
+        await bot.editMessageText(`⬇️ Downloading video... (${elapsed}s elapsed)`, { chat_id: chatId, message_id: dlMsg.message_id });
+      } catch {}
+    }, 10000);
+
     const filePath = await downloadWithYtdlp(url, chatId);
+    clearInterval(progressInterval);
+
+    const dlTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    const sizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
+    await updateProgress(chatId, dlMsg.message_id, `✅ Video downloaded! (${sizeMB} MB in ${dlTime}s)\n\n${COMMANDS_TEXT}`);
     sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
-    bot.sendMessage(
-      chatId,
-      "✅ Video downloaded!\n\n📋 Commands:\n/clip - Auto-detect best moments\n/clip 60 - Custom clip duration\n/qaclip - Find Q&A moments\n/cut 00:01:30 00:02:45 - Manual cut\n/clips 5 - Set number of clips\n/duration 60 - Set max duration"
-    );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
   }
@@ -155,6 +170,14 @@ bot.onText(/\/duration\s+(\d+)/, (msg, match) => {
   bot.sendMessage(chatId, `✅ Max clip duration set to ${match[1]}s.`);
 });
 
+// Helper to update a progress message
+async function updateProgress(chatId, msgId, text) {
+  try {
+    await bot.editMessageText(text, { chat_id: chatId, message_id: msgId });
+  } catch {}
+  return msgId;
+}
+
 // Auto clip
 bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
@@ -165,40 +188,76 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
   if (match[1]) session.clipDuration = parseInt(match[1]);
 
   try {
-    bot.sendMessage(chatId, "🔍 Analyzing video for interesting moments...");
-
-    bot.sendMessage(chatId, "📊 Step 1/3: Detecting scene changes...");
-    const scenes = await detectScenes(session.videoPath);
-    bot.sendMessage(chatId, `📊 Step 2/3: Analyzing audio peaks... (found ${scenes.length} scenes)`);
-    const audioPeaks = await detectAudioPeaks(session.videoPath);
-    bot.sendMessage(chatId, `📊 Step 3/3: Scoring highlights... (found ${audioPeaks.length} audio peaks)`);
     const duration = await getVideoDuration(session.videoPath);
+    const durationStr = formatTime(duration);
+    const statusMsg = await bot.sendMessage(chatId,
+      `🔍 Analyzing ${durationStr} video...\n\n` +
+      `⬜⬜⬜⬜⬜ 0%\n` +
+      `Step 1/4: Detecting scene changes...`
+    );
+    const mid = statusMsg.message_id;
 
-    // Merge scene changes and audio peaks into scored segments
+    const startTime = Date.now();
+    const scenes = await detectScenes(session.videoPath);
+    const sceneTime = ((Date.now() - startTime) / 1000).toFixed(0);
+    await updateProgress(chatId, mid,
+      `🔍 Analyzing ${durationStr} video...\n\n` +
+      `🟩🟩⬜⬜⬜ 40%\n` +
+      `✅ Scene detection: ${scenes.length} scenes (${sceneTime}s)\n` +
+      `Step 2/4: Analyzing audio peaks...`
+    );
+
+    const audioStart = Date.now();
+    const audioPeaks = await detectAudioPeaks(session.videoPath);
+    const audioTime = ((Date.now() - audioStart) / 1000).toFixed(0);
+    await updateProgress(chatId, mid,
+      `🔍 Analyzing ${durationStr} video...\n\n` +
+      `🟩🟩🟩🟩⬜ 80%\n` +
+      `✅ Scene detection: ${scenes.length} scenes (${sceneTime}s)\n` +
+      `✅ Audio analysis: ${audioPeaks.length} peaks (${audioTime}s)\n` +
+      `Step 3/4: Scoring highlights...`
+    );
+
     const highlights = scoreSegments(scenes, audioPeaks, duration, session.clipCount, session.clipDuration);
 
     if (highlights.length === 0) {
-      return bot.sendMessage(chatId, "Couldn't detect interesting moments. Try /cut manually.");
+      return updateProgress(chatId, mid, "❌ Couldn't detect interesting moments. Try /cut manually.");
     }
 
-    bot.sendMessage(chatId, `✂️ Found ${highlights.length} highlight(s). Cutting clips...`);
+    await updateProgress(chatId, mid,
+      `🔍 Analyzing ${durationStr} video...\n\n` +
+      `🟩🟩🟩🟩🟩 100%\n` +
+      `✅ Scene detection: ${scenes.length} scenes (${sceneTime}s)\n` +
+      `✅ Audio analysis: ${audioPeaks.length} peaks (${audioTime}s)\n` +
+      `✅ Found ${highlights.length} highlight(s)\n\n` +
+      `✂️ Cutting & sending clips...`
+    );
 
     for (let i = 0; i < highlights.length; i++) {
       const { start, end } = highlights[i];
+      const clipDur = (end - start).toFixed(0);
       const outPath = path.join(TEMP_DIR, `clip_${chatId}_${i}.mp4`);
+
+      await updateProgress(chatId, mid,
+        `✂️ Cutting clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)...\n` +
+        `${'🟩'.repeat(i + 1)}${'⬜'.repeat(highlights.length - i - 1)} ${i + 1}/${highlights.length}`
+      );
 
       await cutVideo(session.videoPath, start, end, outPath);
 
-      const startStr = formatTime(start);
-      const endStr = formatTime(end);
       await bot.sendVideo(chatId, outPath, {
-        caption: `🎬 Clip ${i + 1}/${highlights.length} (${startStr} → ${endStr})`,
+        caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)`,
       });
 
       fs.unlinkSync(outPath);
     }
 
-    bot.sendMessage(chatId, "✅ All clips sent!");
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(0);
+    await updateProgress(chatId, mid,
+      `✅ Done! ${highlights.length} clips sent in ${totalTime}s\n\n` +
+      `📊 Summary:\n` +
+      highlights.map((h, i) => `  ${i + 1}. ${formatTime(h.start)} → ${formatTime(h.end)} (${(h.end - h.start).toFixed(0)}s)`).join('\n')
+    );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
   }
