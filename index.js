@@ -144,8 +144,10 @@ bot.onText(/\/start/, (msg) => {
       `/clip 60 - Auto-clip with custom duration\n` +
       `/qaclip - Find Q&A moments and clip answers with question as caption\n` +
       `/cut HH:MM:SS HH:MM:SS - Manual cut with start & end time\n` +
-      `/clips N - Set number of auto clips (default: 3)\n` +
-      `/duration N - Set max clip duration in seconds (default: 30)\n\n` +
+      `/clips 5 - Set number of auto clips (default: 3)\n` +
+      `/duration 60 - Set max clip duration in seconds (default: 60)\n` +
+      `/stop - Cancel current operation\n` +
+      `/status - Show current session info\n\n` +
       `Also supports YouTube, Twitter/X, Instagram, TikTok links!`,
     { parse_mode: "Markdown" }
   );
