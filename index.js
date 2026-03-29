@@ -1962,6 +1962,7 @@ function transcribeWithWhisper(wavPath) {
   return new Promise((resolve, reject) => {
     const proc = spawn("python3", [path.join(__dirname, "transcribe.py"), wavPath], {
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, HF_HUB_DISABLE_SYMLINKS_WARNING: "1", TOKENIZERS_PARALLELISM: "false" },
     });
     let stdout = "";
     let stderr = "";
@@ -1970,13 +1971,18 @@ function transcribeWithWhisper(wavPath) {
     proc.stderr.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", (code) => {
-      if (code !== 0) return reject(new Error(`Transcription failed: ${stderr}`));
+      // Try to parse stdout first regardless of exit code (warnings go to stderr)
       try {
         const chunks = JSON.parse(stdout);
-        resolve(chunks);
-      } catch {
-        reject(new Error("Failed to parse transcription output"));
+        if (chunks.length > 0) return resolve(chunks);
+      } catch {}
+      // If stdout parsing failed AND exit code is non-zero, report error
+      if (code !== 0) {
+        // Filter out warnings from stderr
+        const realErrors = stderr.split('\n').filter(l => !l.includes('Warning') && !l.includes('FutureWarning') && l.trim()).join('\n');
+        return reject(new Error(`Transcription failed: ${realErrors || stderr}`));
       }
+      reject(new Error("No transcription output"));
     });
 
     proc.on("error", reject);
