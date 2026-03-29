@@ -2119,7 +2119,8 @@ function formatTime(seconds) {
 // Health endpoint + Admin Web Dashboard
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
-  if (req.url === "/admin" || req.url === "/dashboard") {
+  const dashKey = process.env.DASHBOARD_KEY || "admin123";
+  if (req.url === `/dashboard?key=${dashKey}` || req.url === `/admin?key=${dashKey}`) {
     const users = Object.values(db.users);
     const authorized = users.filter(u => u.authorized);
     const activeToday = users.filter(u => (Date.now() - new Date(u.lastActive)) < 86400000);
