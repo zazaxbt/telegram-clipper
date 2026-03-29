@@ -1970,17 +1970,20 @@ function transcribeWithWhisper(wavPath) {
     proc.stdout.on("data", (data) => { stdout += data.toString(); });
     proc.stderr.on("data", (data) => { stderr += data.toString(); });
 
-    proc.on("close", (code) => {
+    proc.on("close", (code, signal) => {
       // Try to parse stdout first regardless of exit code (warnings go to stderr)
       try {
         const chunks = JSON.parse(stdout);
         if (chunks.length > 0) return resolve(chunks);
       } catch {}
+      // Detect OOM kill
+      if (signal === 'SIGKILL' || code === 137) {
+        return reject(new Error("Out of memory — video too large for transcription. Try a shorter video or use /clip instead."));
+      }
       // If stdout parsing failed AND exit code is non-zero, report error
       if (code !== 0) {
-        // Filter out warnings from stderr
         const realErrors = stderr.split('\n').filter(l => !l.includes('Warning') && !l.includes('FutureWarning') && l.trim()).join('\n');
-        return reject(new Error(`Transcription failed: ${realErrors || stderr}`));
+        return reject(new Error(`Transcription failed: ${realErrors || stderr || 'Unknown error (exit code ' + code + ')'}`));
       }
       reject(new Error("No transcription output"));
     });
