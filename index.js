@@ -37,9 +37,20 @@ const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
       { command: 'cut', description: '🔪 Manual cut (start end)' },
       { command: 'clips', description: '🔢 Set number of clips' },
       { command: 'duration', description: '⏱️ Set max clip duration' },
-      { command: 'edit', description: '🎬 Video editing tools' },
+      { command: 'edit', description: '🎬 All editing commands' },
+      { command: 'speed', description: '⚡ Change speed (0.5, 1.5, 2)' },
+      { command: 'mute', description: '🔇 Remove audio' },
+      { command: 'audio', description: '🎵 Extract audio as MP3' },
+      { command: 'text', description: '📝 Add text overlay' },
+      { command: 'crop', description: '📐 Crop (9:16, 1:1, 16:9)' },
+      { command: 'filter', description: '🎨 Apply visual filter' },
+      { command: 'gif', description: '🎞️ Convert to GIF' },
+      { command: 'compress', description: '📉 Reduce file size' },
+      { command: 'volume', description: '🔊 Adjust volume' },
+      { command: 'resize', description: '📐 Resize video' },
+      { command: 'merge', description: '🔗 Merge multiple videos' },
       { command: 'stop', description: '🛑 Cancel current operation' },
-      { command: 'status', description: '📊 Show current session info' },
+      { command: 'status', description: '📊 Show session info' },
     ]);
     console.log("📋 Command menu registered");
   } catch (err) {
