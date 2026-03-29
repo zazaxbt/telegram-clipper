@@ -2078,8 +2078,9 @@ function extractQASegments(chunks, maxClipDuration) {
       // Skip if no answer found (question at end of video)
       if (answerEnd <= answerStart) continue;
 
-      // Cap at 60 seconds
-      const clipEnd = Math.min(answerEnd, answerStart + MAX_QA_DURATION);
+      // Minimum 30 seconds, max 60 seconds
+      const MIN_QA_DURATION = 30;
+      const clipEnd = Math.min(Math.max(answerEnd, answerStart + MIN_QA_DURATION), answerStart + MAX_QA_DURATION);
 
       qaClips.push({
         question: question,
