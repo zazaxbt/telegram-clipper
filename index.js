@@ -120,6 +120,7 @@ initGramClient().catch((err) => console.error("GramJS init failed:", err.message
 const ADMIN_ID = parseInt(process.env.ADMIN_TELEGRAM_ID) || 0;
 const ACCESS_CODE = process.env.BOT_ACCESS_CODE || "clipper2024";
 const IS_PRIVATE = process.env.BOT_PRIVATE === "true";
+console.log(`🔒 Bot mode: ${IS_PRIVATE ? 'PRIVATE' : 'PUBLIC'} | Admin ID: ${ADMIN_ID} | Access code: ${ACCESS_CODE}`);
 
 // Simple JSON file-based storage for users and stats
 const DB_PATH = path.join(__dirname, "db.json");
@@ -357,8 +358,7 @@ bot.onText(/\/start/, (msg) => {
   trackUser(msg);
   if (!isAuthorized(msg.chat.id)) {
     return bot.sendMessage(msg.chat.id,
-      `🔒 *This bot is private.*\n\nYou need an access code to use it.\n\nSend: /access YOUR_CODE`,
-      { parse_mode: "Markdown" }
+      `🔒 This bot is private.\n\nYou need an access code to use it.\n\nSend: /access YOUR_CODE`
     );
   }
   bot.sendMessage(
