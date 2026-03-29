@@ -13,7 +13,7 @@ from faster_whisper import WhisperModel
 audio_path = sys.argv[1]
 
 try:
-    model = WhisperModel("tiny", device="cpu", compute_type="int8", download_root="/tmp/whisper_models")
+    model = WhisperModel("tiny", device="cpu", compute_type="int8", download_root="/app/whisper_models")
     segments, info = model.transcribe(audio_path)
 
     chunks = []

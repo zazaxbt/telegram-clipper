@@ -1,10 +1,13 @@
 FROM node:20-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip curl && \
-    pip3 install --break-system-packages --no-cache-dir faster-whisper && \
+    pip3 install --break-system-packages --no-cache-dir faster-whisper huggingface_hub && \
     curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
     chmod a+rx /usr/local/bin/yt-dlp && \
     apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Pre-download whisper tiny model during build so it's cached
+RUN python3 -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8', download_root='/app/whisper_models')"
 
 WORKDIR /app
 COPY package*.json ./
