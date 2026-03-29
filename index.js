@@ -28,6 +28,19 @@ const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
     await new Promise((r) => setTimeout(r, 5000));
     await bot.startPolling();
     console.log("✅ Polling started successfully");
+
+    // Set up command menu in Telegram
+    await bot.setMyCommands([
+      { command: 'start', description: '🏠 Show welcome & help' },
+      { command: 'clip', description: '✂️ Auto-detect best clips' },
+      { command: 'qaclip', description: '❓ Find Q&A moments' },
+      { command: 'cut', description: '🔪 Manual cut (start end)' },
+      { command: 'clips', description: '🔢 Set number of clips' },
+      { command: 'duration', description: '⏱️ Set max clip duration' },
+      { command: 'stop', description: '🛑 Cancel current operation' },
+      { command: 'status', description: '📊 Show current session info' },
+    ]);
+    console.log("📋 Command menu registered");
   } catch (err) {
     console.error("Failed to start polling, retrying in 10s...", err.message);
     setTimeout(async () => {
@@ -77,6 +90,49 @@ initGramClient().catch((err) => console.error("GramJS init failed:", err.message
 // Track user sessions
 const sessions = {};
 let processingLock = false;
+let activeProcess = null; // Track active FFmpeg/child process for cancellation
+let cancelRequested = {}; // Track cancel per chat
+
+// /stop - Cancel current operation
+bot.onText(/\/stop/, (msg) => {
+  const chatId = msg.chat.id;
+  cancelRequested[chatId] = true;
+
+  // Kill active child process if any
+  if (activeProcess && activeProcess.kill) {
+    try { activeProcess.kill('SIGKILL'); } catch {}
+    activeProcess = null;
+  }
+
+  processingLock = false;
+
+  // Clean up temp files for this session
+  const session = sessions[chatId];
+  if (session && session.videoPath) {
+    try { fs.unlinkSync(session.videoPath); } catch {}
+  }
+  delete sessions[chatId];
+
+  bot.sendMessage(chatId, "🛑 *Operation cancelled.* Send a new video to start fresh.", { parse_mode: "Markdown" });
+});
+
+// /status - Show current session info
+bot.onText(/\/status/, (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session) {
+    return bot.sendMessage(chatId, "📊 *Status:* No active session.\nSend a video to get started.", { parse_mode: "Markdown" });
+  }
+  const info = [
+    `📊 *Session Status*`,
+    ``,
+    `📁 Video: ${session.videoPath ? '✅ Loaded' : '❌ None'}`,
+    `⏱️ Max duration: ${session.clipDuration || 60}s`,
+    `🔢 Clip count: ${session.clipCount || 3}`,
+    `⚙️ Processing: ${processingLock ? '🔄 In progress...' : '💤 Idle'}`,
+  ];
+  bot.sendMessage(chatId, info.join('\n'), { parse_mode: "Markdown" });
+});
 
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
@@ -312,7 +368,12 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
       `✂️ Cutting clips...`
     );
 
+    cancelRequested[chatId] = false;
     for (let i = 0; i < highlights.length; i++) {
+      if (cancelRequested[chatId]) {
+        await updateProgress(chatId, mid, "🛑 Cancelled.");
+        break;
+      }
       const { start, end } = highlights[i];
       const clipDur = (end - start).toFixed(0);
       const outPath = path.join(TEMP_DIR, `clip_${chatId}_${i}.mp4`);
