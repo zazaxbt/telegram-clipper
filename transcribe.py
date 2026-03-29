@@ -2,18 +2,41 @@ import sys
 import os
 import json
 import warnings
+import traceback
 
-# Suppress HuggingFace warnings
+# Suppress all warnings
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 warnings.filterwarnings("ignore")
 
-from faster_whisper import WhisperModel
-
-audio_path = sys.argv[1]
+# Redirect stderr to suppress library warnings
+import io
+old_stderr = sys.stderr
+sys.stderr = io.StringIO()
 
 try:
-    model = WhisperModel("tiny", device="cpu", compute_type="int8", download_root="/app/whisper_models")
+    from faster_whisper import WhisperModel
+
+    audio_path = sys.argv[1]
+
+    # Try multiple model paths
+    model_paths = ["/app/whisper_models", "/tmp/whisper_models", None]
+    model = None
+    for mp in model_paths:
+        try:
+            if mp:
+                model = WhisperModel("tiny", device="cpu", compute_type="int8", download_root=mp)
+            else:
+                model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            break
+        except Exception:
+            continue
+
+    if model is None:
+        sys.stderr = old_stderr
+        print("ERROR: Could not load whisper model", file=sys.stderr)
+        sys.exit(1)
+
     segments, info = model.transcribe(audio_path)
 
     chunks = []
@@ -23,7 +46,10 @@ try:
             "timestamp": [segment.start, segment.end]
         })
 
+    sys.stderr = old_stderr
     print(json.dumps(chunks))
+
 except Exception as e:
-    print(json.dumps([]), flush=True)
+    sys.stderr = old_stderr
+    print(f"TRANSCRIBE_ERROR: {str(e)}\n{traceback.format_exc()}", file=sys.stderr)
     sys.exit(1)
