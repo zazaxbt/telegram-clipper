@@ -1996,6 +1996,7 @@ function extractAudio(videoPath, wavPath) {
 
 function extractQASegments(chunks, maxClipDuration) {
   const qaClips = [];
+  const MAX_QA_DURATION = 60; // max 1 minute per clip
 
   for (let i = 0; i < chunks.length; i++) {
     const text = chunks[i].text.trim();
@@ -2003,32 +2004,32 @@ function extractQASegments(chunks, maxClipDuration) {
     // Detect questions
     if (text.includes("?")) {
       const question = text;
-      const questionStart = chunks[i].timestamp[0];
 
-      // The answer is everything after the question until the next question or maxClipDuration
+      // Answer starts RIGHT AFTER the question ends (not including the question)
       const answerStart = chunks[i].timestamp[1] || chunks[i].timestamp[0];
-      let answerEnd = answerStart + maxClipDuration;
+      let answerEnd = answerStart;
 
-      // Collect answer text from following chunks
+      // Collect answer from following chunks until next question or 60s limit
       for (let j = i + 1; j < chunks.length; j++) {
         const nextText = chunks[j].text.trim();
         const nextEnd = chunks[j].timestamp[1] || chunks[j].timestamp[0];
 
-        // Stop if we hit another question or exceed duration
-        if (nextText.includes("?") || nextEnd - questionStart > maxClipDuration) {
-          answerEnd = nextEnd;
+        // Stop if we hit another question or exceed 60 seconds
+        if (nextText.includes("?") || nextEnd - answerStart > MAX_QA_DURATION) {
           break;
         }
         answerEnd = nextEnd;
       }
 
-      // Clip starts a bit before the question for context
-      const clipStart = Math.max(0, questionStart - 1);
-      const clipEnd = Math.min(answerEnd, clipStart + maxClipDuration);
+      // Skip if no answer found (question at end of video)
+      if (answerEnd <= answerStart) continue;
+
+      // Cap at 60 seconds
+      const clipEnd = Math.min(answerEnd, answerStart + MAX_QA_DURATION);
 
       qaClips.push({
         question: question,
-        start: clipStart,
+        start: answerStart,
         end: clipEnd,
       });
     }
