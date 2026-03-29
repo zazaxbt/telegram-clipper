@@ -1497,7 +1497,7 @@ bot.onText(/^\/musiclib(?:\s+(.+))?$/, async (msg, match) => {
         };
         const cookiesPath = path.join(__dirname, "cookies.txt");
         if (fs.existsSync(cookiesPath)) ytOpts.cookies = cookiesPath;
-        youtubedl(`ytsearch1:${query} royalty free music no copyright`, ytOpts)
+        youtubedl(`ytsearch1:${query}`, ytOpts)
           .then(resolve).catch(reject);
       });
 
