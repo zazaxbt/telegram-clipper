@@ -859,7 +859,8 @@ bot.onText(/^\/edit$/, (msg) => {
     `/audio - Extract as MP3\n` +
     `/volume 1.5 - Adjust volume\n` +
     `/voice deep - Voice effects\n` +
-    `/music - Add background music\n\n` +
+    `/music - Add background music\n` +
+    `/musiclib - Browse royalty-free music\n\n` +
     `*🤖 AI Features:*\n` +
     `/caption - Auto-generate captions\n\n` +
     `*🎬 Advanced:*\n` +
@@ -1445,6 +1446,154 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
     [outPath, assPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
     await updateProgress(chatId, statusMsg.message_id, `✅ Captions added! ${chunks.length} segments burned onto video.`);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /musiclib - Browse and add royalty-free music
+bot.onText(/^\/musiclib(?:\s+(.+))?$/, async (msg, match) => {
+  if (isBlocked(msg)) return;
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  if (!match[1]) {
+    // Show mood categories with inline keyboard
+    return bot.sendMessage(chatId,
+      `🎵 *Music Library*\n\nPick a mood or search:\n\n` +
+      `/musiclib energetic - Upbeat, action\n` +
+      `/musiclib chill - Relaxed, lo-fi\n` +
+      `/musiclib dramatic - Cinematic, epic\n` +
+      `/musiclib happy - Feel good, positive\n` +
+      `/musiclib sad - Emotional, melancholy\n` +
+      `/musiclib hip hop - Hip hop beats\n` +
+      `/musiclib electronic - EDM, synth\n` +
+      `/musiclib acoustic - Guitar, piano\n` +
+      `/musiclib jazz - Smooth jazz\n` +
+      `/musiclib rock - Rock, indie\n\n` +
+      `Or search anything: /musiclib your search term`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  const query = match[1].trim();
+  const PIXABAY_KEY = process.env.PIXABAY_API_KEY;
+
+  if (!PIXABAY_KEY) {
+    // Fallback: use yt-dlp to download from YouTube Audio Library
+    try {
+      bot.sendMessage(chatId, `🔍 Searching for "${query}" music...`);
+      const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query + " royalty free music no copyright")}&sp=EgIQAQ%253D%253D`;
+      const dest = path.join(TEMP_DIR, `musiclib_${chatId}.mp3`);
+
+      await new Promise((resolve, reject) => {
+        const ytOpts = {
+          output: dest,
+          extractAudio: true,
+          audioFormat: "mp3",
+          audioQuality: 5,
+          noCheckCertificates: true,
+          noWarnings: true,
+          defaultSearch: "ytsearch1",
+          format: "bestaudio",
+        };
+        const cookiesPath = path.join(__dirname, "cookies.txt");
+        if (fs.existsSync(cookiesPath)) ytOpts.cookies = cookiesPath;
+        youtubedl(`ytsearch1:${query} royalty free music no copyright`, ytOpts)
+          .then(resolve).catch(reject);
+      });
+
+      // Find the downloaded file
+      const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(`musiclib_${chatId}`));
+      let audioFile = dest;
+      if (!fs.existsSync(dest) && files.length > 0) {
+        audioFile = path.join(TEMP_DIR, files[0]);
+      }
+
+      if (!fs.existsSync(audioFile)) {
+        return bot.sendMessage(chatId, "❌ Couldn't find music. Try a different search term.");
+      }
+
+      session.audioPath = audioFile;
+
+      // Send preview
+      try {
+        await bot.sendAudio(chatId, audioFile, {
+          caption: `🎵 Found: "${query}" music\n\n✅ Use /music to add it to your video\n🔊 /music 0.5 to set volume`,
+        });
+      } catch {
+        bot.sendMessage(chatId, `🎵 Music found for "${query}"!\n\n✅ Use /music to add it to your video\n🔊 /music 0.5 to set volume`);
+      }
+    } catch (err) {
+      bot.sendMessage(chatId, `❌ Error finding music: ${err.message}`);
+    }
+    return;
+  }
+
+  // Use Pixabay API
+  try {
+    bot.sendMessage(chatId, `🔍 Searching "${query}" in music library...`);
+    const apiUrl = `https://pixabay.com/api/?key=${PIXABAY_KEY}&q=${encodeURIComponent(query)}&media_type=music&per_page=5`;
+
+    const data = await new Promise((resolve, reject) => {
+      https.get(apiUrl, (res) => {
+        let body = "";
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => {
+          try { resolve(JSON.parse(body)); } catch { reject(new Error("Bad API response")); }
+        });
+      }).on("error", reject);
+    });
+
+    if (!data.hits || data.hits.length === 0) {
+      return bot.sendMessage(chatId, `❌ No music found for "${query}". Try another term.`);
+    }
+
+    // Store results in session for selection
+    session.musicResults = data.hits;
+
+    let msg_text = `🎵 *Found ${data.hits.length} tracks for "${query}":*\n\n`;
+    data.hits.forEach((track, i) => {
+      const dur = Math.floor(track.duration / 60) + ":" + String(track.duration % 60).padStart(2, "0");
+      msg_text += `${i + 1}. 🎶 ${track.tags || "Untitled"} (${dur})\n`;
+    });
+    msg_text += `\nSelect: /musicpick 1 (or 2, 3, etc.)`;
+
+    bot.sendMessage(chatId, msg_text, { parse_mode: "Markdown" });
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /musicpick N - Pick a track from musiclib results
+bot.onText(/^\/musicpick\s+(\d+)$/, async (msg, match) => {
+  if (isBlocked(msg)) return;
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  if (session.musicResults) {
+    // Pixabay results
+    const idx = parseInt(match[1]) - 1;
+    if (!session.musicResults[idx]) return bot.sendMessage(chatId, "Invalid selection.");
+    const track = session.musicResults[idx];
+
+    try {
+      bot.sendMessage(chatId, `⬇️ Downloading "${track.tags}"...`);
+      const dest = path.join(TEMP_DIR, `musicpick_${chatId}.mp3`);
+      await new Promise((resolve, reject) => {
+        const ws = fs.createWriteStream(dest);
+        https.get(track.previewURL || track.audio, (res) => {
+          res.pipe(ws);
+          ws.on("finish", () => { ws.close(); resolve(); });
+        }).on("error", reject);
+      });
+      session.audioPath = dest;
+      bot.sendMessage(chatId, `✅ "${track.tags}" selected!\n\nUse /music to add it to your video\n🔊 /music 0.5 to set volume`);
+    } catch (err) {
+      bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+    }
+  } else {
+    bot.sendMessage(chatId, "Use /musiclib first to search for music.");
+  }
 });
 
 // /music - Add background music
