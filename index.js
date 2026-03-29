@@ -241,17 +241,23 @@ bot.onText(socialPattern, async (msg, match) => {
 });
 
 // Set number of clips
-bot.onText(/^\/clips\s+(\d+)/, (msg, match) => {
+bot.onText(/^\/clips(?:\s+(\d+))?$/, (msg, match) => {
   const chatId = msg.chat.id;
   if (!sessions[chatId]) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) {
+    return bot.sendMessage(chatId, `🔢 Current clip count: *${sessions[chatId].clipCount || 3}*\n\nUsage: /clips 5`, { parse_mode: "Markdown" });
+  }
   sessions[chatId].clipCount = parseInt(match[1]);
   bot.sendMessage(chatId, `✅ Will generate ${match[1]} clips.`);
 });
 
 // Set clip duration
-bot.onText(/\/duration\s+(\d+)/, (msg, match) => {
+bot.onText(/^\/duration(?:\s+(\d+))?$/, (msg, match) => {
   const chatId = msg.chat.id;
   if (!sessions[chatId]) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) {
+    return bot.sendMessage(chatId, `⏱️ Current max duration: *${sessions[chatId].clipDuration || 60}s*\n\nUsage: /duration 60`, { parse_mode: "Markdown" });
+  }
   sessions[chatId].clipDuration = parseInt(match[1]);
   bot.sendMessage(chatId, `✅ Max clip duration set to ${match[1]}s.`);
 });
@@ -484,7 +490,12 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
   }
 });
 
-// Manual cut
+// Manual cut - show usage if no args
+bot.onText(/^\/cut$/, (msg) => {
+  bot.sendMessage(msg.chat.id, `🔪 *Manual Cut*\n\nUsage: /cut START END\n\nExamples:\n/cut 00:01:30 00:02:45\n/cut 90 165\n/cut 1:30 2:45`, { parse_mode: "Markdown" });
+});
+
+// Manual cut with arguments
 bot.onText(/\/cut\s+(\S+)\s+(\S+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
