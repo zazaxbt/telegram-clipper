@@ -37,6 +37,7 @@ const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
       { command: 'cut', description: '🔪 Manual cut (start end)' },
       { command: 'clips', description: '🔢 Set number of clips' },
       { command: 'duration', description: '⏱️ Set max clip duration' },
+      { command: 'edit', description: '🎬 Video editing tools' },
       { command: 'stop', description: '🛑 Cancel current operation' },
       { command: 'status', description: '📊 Show current session info' },
     ]);
@@ -139,15 +140,18 @@ bot.onText(/\/start/, (msg) => {
     msg.chat.id,
     `🎬 *Telegram Clipper Bot*\n\n` +
       `Send me a video (upload or URL) and I'll find the best clips automatically!\n\n` +
-      `*Commands:*\n` +
+      `*✂️ Clipping:*\n` +
       `/clip - Auto-detect and cut best clips\n` +
       `/clip 60 - Auto-clip with custom duration\n` +
-      `/qaclip - Find Q&A moments and clip answers with question as caption\n` +
-      `/cut HH:MM:SS HH:MM:SS - Manual cut with start & end time\n` +
-      `/clips 5 - Set number of auto clips (default: 3)\n` +
-      `/duration 60 - Set max clip duration in seconds (default: 60)\n` +
+      `/qaclip - Find Q&A moments with captions\n` +
+      `/cut HH:MM:SS HH:MM:SS - Manual cut\n` +
+      `/clips 5 - Set number of clips\n` +
+      `/duration 60 - Set max clip duration\n\n` +
+      `*🎬 Editing:*\n` +
+      `/edit - Show all editing commands\n\n` +
+      `*⚙️ General:*\n` +
       `/stop - Cancel current operation\n` +
-      `/status - Show current session info\n\n` +
+      `/status - Show session info\n\n` +
       `Also supports YouTube, Twitter/X, Instagram, TikTok links!`,
     { parse_mode: "Markdown" }
   );
@@ -529,7 +533,408 @@ bot.onText(/\/cut\s+(\S+)\s+(\S+)/, async (msg, match) => {
   }
 });
 
+// =============================================
+// --- VIDEO EDITING SECTION ---
+// =============================================
+
+// /edit - Show editing menu
+bot.onText(/^\/edit$/, (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) {
+    return bot.sendMessage(chatId, "Send a video first.");
+  }
+  bot.sendMessage(chatId,
+    `🎬 *Video Editor*\n\n` +
+    `*Basic:*\n` +
+    `/speed 1.5 - Change speed (0.5 = slow, 2 = fast)\n` +
+    `/mute - Remove audio\n` +
+    `/audio - Extract audio only (MP3)\n\n` +
+    `*Visual:*\n` +
+    `/text Your Text - Add text overlay\n` +
+    `/watermark - Add watermark (send image first)\n` +
+    `/crop 9:16 - Crop aspect ratio (9:16, 1:1, 16:9)\n` +
+    `/filter grayscale - Apply filter\n\n` +
+    `*Format:*\n` +
+    `/gif - Convert to GIF\n` +
+    `/compress - Reduce file size\n` +
+    `/volume 1.5 - Adjust volume (0.5 = quieter, 2 = louder)\n` +
+    `/merge - Merge clips (send multiple videos first)\n` +
+    `/resize 1280x720 - Resize video`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+// /speed - Change playback speed
+bot.onText(/^\/speed(?:\s+([\d.]+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId, "Usage: /speed 1.5\n\nExamples:\n/speed 0.5 (slow motion)\n/speed 2 (2x fast)\n/speed 0.25 (super slow)");
+
+  const speed = parseFloat(match[1]);
+  if (speed <= 0 || speed > 10) return bot.sendMessage(chatId, "Speed must be between 0.1 and 10.");
+
+  try {
+    bot.sendMessage(chatId, `⚡ Changing speed to ${speed}x...`);
+    const outPath = path.join(TEMP_DIR, `speed_${chatId}.mp4`);
+    const videoFilter = `setpts=${(1/speed).toFixed(4)}*PTS`;
+    const audioFilter = `atempo=${speed > 2 ? 2 : speed < 0.5 ? 0.5 : speed}`;
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-vf", videoFilter, "-af", audioFilter, "-preset", "ultrafast"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: `⚡ Speed: ${speed}x` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /mute - Remove audio
+bot.onText(/^\/mute$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  try {
+    bot.sendMessage(chatId, "🔇 Removing audio...");
+    const outPath = path.join(TEMP_DIR, `mute_${chatId}.mp4`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-c:v", "copy", "-an"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: "🔇 Audio removed" });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /audio - Extract audio as MP3
+bot.onText(/^\/audio$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  try {
+    bot.sendMessage(chatId, "🎵 Extracting audio...");
+    const outPath = path.join(TEMP_DIR, `audio_${chatId}.mp3`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-vn", "-acodec", "libmp3lame", "-q:a", "2"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendAudio(chatId, outPath, { caption: "🎵 Extracted audio" });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /text - Add text overlay
+bot.onText(/^\/text\s+(.+)$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  const text = match[1].replace(/'/g, "\\'");
+
+  try {
+    bot.sendMessage(chatId, `📝 Adding text: "${match[1]}"...`);
+    const outPath = path.join(TEMP_DIR, `text_${chatId}.mp4`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions([
+          "-vf", `drawtext=text='${text}':fontsize=48:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-th-40`,
+          "-c:a", "copy",
+          "-preset", "ultrafast"
+        ])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: `📝 Text: "${match[1]}"` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+bot.onText(/^\/text$/, (msg) => {
+  bot.sendMessage(msg.chat.id, "Usage: /text Your Text Here");
+});
+
+// /crop - Crop to aspect ratio
+bot.onText(/^\/crop(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId, "Usage: /crop RATIO\n\nExamples:\n/crop 9:16 (TikTok/Reels)\n/crop 1:1 (Square)\n/crop 16:9 (YouTube)\n/crop 4:5 (Instagram)");
+
+  const ratio = match[1];
+  const [w, h] = ratio.split(":").map(Number);
+  if (!w || !h) return bot.sendMessage(chatId, "Invalid ratio. Use format like 9:16, 1:1, 16:9");
+
+  try {
+    bot.sendMessage(chatId, `📐 Cropping to ${ratio}...`);
+    const outPath = path.join(TEMP_DIR, `crop_${chatId}.mp4`);
+    const cropFilter = `crop=min(iw\\,ih*${w}/${h}):min(ih\\,iw*${h}/${w})`;
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-vf", cropFilter, "-c:a", "copy", "-preset", "ultrafast"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: `📐 Cropped to ${ratio}` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /filter - Apply visual filter
+bot.onText(/^\/filter(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId,
+    "Usage: /filter NAME\n\n" +
+    "Available filters:\n" +
+    "• grayscale - Black & white\n" +
+    "• sepia - Warm vintage tone\n" +
+    "• bright - Increase brightness\n" +
+    "• dark - Decrease brightness\n" +
+    "• contrast - High contrast\n" +
+    "• blur - Gaussian blur\n" +
+    "• sharpen - Sharpen video\n" +
+    "• mirror - Horizontal flip\n" +
+    "• flip - Vertical flip\n" +
+    "• negative - Invert colors"
+  );
+
+  const filters = {
+    grayscale: "colorchannelmixer=.3:.4:.3:0:.3:.4:.3:0:.3:.4:.3",
+    sepia: "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131",
+    bright: "eq=brightness=0.15",
+    dark: "eq=brightness=-0.15",
+    contrast: "eq=contrast=1.5",
+    blur: "boxblur=5:1",
+    sharpen: "unsharp=5:5:1.5",
+    mirror: "hflip",
+    flip: "vflip",
+    negative: "negate",
+  };
+
+  const filterName = match[1].toLowerCase();
+  if (!filters[filterName]) return bot.sendMessage(chatId, `Unknown filter. Use /filter to see available options.`);
+
+  try {
+    bot.sendMessage(chatId, `🎨 Applying ${filterName} filter...`);
+    const outPath = path.join(TEMP_DIR, `filter_${chatId}.mp4`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-vf", filters[filterName], "-c:a", "copy", "-preset", "ultrafast"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: `🎨 Filter: ${filterName}` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /gif - Convert to GIF
+bot.onText(/^\/gif$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  try {
+    bot.sendMessage(chatId, "🎞️ Converting to GIF...");
+    const outPath = path.join(TEMP_DIR, `gif_${chatId}.gif`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-vf", "fps=15,scale=480:-1:flags=lanczos", "-t", "15"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendAnimation(chatId, outPath, { caption: "🎞️ GIF (max 15s, 480px)" });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /compress - Reduce file size
+bot.onText(/^\/compress$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  try {
+    const origSize = (fs.statSync(session.videoPath).size / 1024 / 1024).toFixed(1);
+    bot.sendMessage(chatId, `📉 Compressing video (${origSize} MB)...`);
+    const outPath = path.join(TEMP_DIR, `compress_${chatId}.mp4`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-c:v", "libx264", "-crf", "28", "-preset", "fast", "-c:a", "aac", "-b:a", "96k", "-vf", "scale=-2:720"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    const newSize = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1);
+    await bot.sendVideo(chatId, outPath, { caption: `📉 Compressed: ${origSize} MB → ${newSize} MB` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /volume - Adjust audio volume
+bot.onText(/^\/volume(?:\s+([\d.]+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId, "Usage: /volume 1.5\n\nExamples:\n/volume 0.5 (50% quieter)\n/volume 2 (2x louder)\n/volume 3 (3x louder)");
+
+  const vol = parseFloat(match[1]);
+  if (vol <= 0 || vol > 10) return bot.sendMessage(chatId, "Volume must be between 0.1 and 10.");
+
+  try {
+    bot.sendMessage(chatId, `🔊 Setting volume to ${vol}x...`);
+    const outPath = path.join(TEMP_DIR, `volume_${chatId}.mp4`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-c:v", "copy", "-af", `volume=${vol}`])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: `🔊 Volume: ${vol}x` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /resize - Resize video
+bot.onText(/^\/resize(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId, "Usage: /resize WIDTHxHEIGHT\n\nExamples:\n/resize 1920x1080\n/resize 1280x720\n/resize 640x480");
+
+  const [w, h] = match[1].split("x").map(Number);
+  if (!w || !h) return bot.sendMessage(chatId, "Invalid format. Use WIDTHxHEIGHT (e.g. 1280x720)");
+
+  try {
+    bot.sendMessage(chatId, `📐 Resizing to ${w}x${h}...`);
+    const outPath = path.join(TEMP_DIR, `resize_${chatId}.mp4`);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath)
+        .output(outPath)
+        .outputOptions(["-vf", `scale=${w}:${h}`, "-c:a", "copy", "-preset", "ultrafast"])
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: `📐 Resized to ${w}x${h}` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// /merge - Merge multiple videos
+bot.onText(/^\/merge$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.mergeList || session.mergeList.length < 2) {
+    return bot.sendMessage(chatId, "Send 2+ videos first, then use /merge.\n\nTip: Send videos one by one, then /merge to combine them.");
+  }
+
+  try {
+    bot.sendMessage(chatId, `🔗 Merging ${session.mergeList.length} videos...`);
+    const listPath = path.join(TEMP_DIR, `merge_${chatId}.txt`);
+    const outPath = path.join(TEMP_DIR, `merged_${chatId}.mp4`);
+
+    const listContent = session.mergeList.map(f => `file '${f}'`).join("\n");
+    fs.writeFileSync(listPath, listContent);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(listPath)
+        .inputOptions(["-f", "concat", "-safe", "0"])
+        .output(outPath)
+        .outputOptions(["-c", "copy"])
+        .on("end", resolve)
+        .on("error", () => {
+          // Fallback: re-encode if concat fails
+          ffmpeg()
+            .input(listPath)
+            .inputOptions(["-f", "concat", "-safe", "0"])
+            .output(outPath)
+            .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+            .on("end", resolve)
+            .on("error", reject)
+            .run();
+        })
+        .run();
+    });
+
+    fs.unlinkSync(listPath);
+    await bot.sendVideo(chatId, outPath, { caption: `🔗 Merged ${session.mergeList.length} videos` });
+    fs.unlinkSync(outPath);
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
+});
+
+// =============================================
 // --- Core Functions ---
+// =============================================
 
 async function downloadTelegramFile(fileId, msg) {
   // Try Bot API first (works for files <50MB)
