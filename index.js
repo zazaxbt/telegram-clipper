@@ -161,7 +161,7 @@ function trackUser(msg) {
 
 function isAuthorized(chatId) {
   if (!IS_PRIVATE) return true;
-  if (chatId === ADMIN_ID) return true;
+  if (String(chatId) === String(ADMIN_ID)) return true;
   return db.users[chatId] && db.users[chatId].authorized;
 }
 
@@ -190,7 +190,7 @@ bot.onText(/^\/access(?:\s+(.+))?$/, (msg, match) => {
 // /admin - Admin dashboard
 bot.onText(/^\/admin$/, (msg) => {
   const chatId = msg.chat.id;
-  if (chatId !== ADMIN_ID) return bot.sendMessage(chatId, "❌ Admin only.");
+  if (String(chatId) !== String(ADMIN_ID)) return bot.sendMessage(chatId, "❌ Admin only.");
 
   const users = Object.values(db.users);
   const authorized = users.filter(u => u.authorized);
@@ -231,7 +231,7 @@ bot.onText(/^\/admin$/, (msg) => {
 // /users - List all users (admin only)
 bot.onText(/^\/users$/, (msg) => {
   const chatId = msg.chat.id;
-  if (chatId !== ADMIN_ID) return;
+  if (String(chatId) !== String(ADMIN_ID)) return;
   const users = Object.values(db.users);
   if (users.length === 0) return bot.sendMessage(chatId, "No users yet.");
   const list = users.map(u =>
@@ -243,7 +243,7 @@ bot.onText(/^\/users$/, (msg) => {
 // /broadcast MESSAGE - Send to all users (admin only)
 bot.onText(/^\/broadcast\s+(.+)$/s, async (msg, match) => {
   const chatId = msg.chat.id;
-  if (chatId !== ADMIN_ID) return;
+  if (String(chatId) !== String(ADMIN_ID)) return;
   const message = match[1];
   const users = Object.values(db.users);
   let sent = 0, failed = 0;
@@ -259,7 +259,7 @@ bot.onText(/^\/broadcast\s+(.+)$/s, async (msg, match) => {
 // /grant USER_ID - Grant access (admin only)
 bot.onText(/^\/grant\s+(\d+)$/, (msg, match) => {
   const chatId = msg.chat.id;
-  if (chatId !== ADMIN_ID) return;
+  if (String(chatId) !== String(ADMIN_ID)) return;
   const userId = match[1];
   if (db.users[userId]) {
     db.users[userId].authorized = true;
@@ -274,7 +274,7 @@ bot.onText(/^\/grant\s+(\d+)$/, (msg, match) => {
 // /revoke USER_ID - Revoke access (admin only)
 bot.onText(/^\/revoke\s+(\d+)$/, (msg, match) => {
   const chatId = msg.chat.id;
-  if (chatId !== ADMIN_ID) return;
+  if (String(chatId) !== String(ADMIN_ID)) return;
   const userId = match[1];
   if (db.users[userId]) {
     db.users[userId].authorized = false;
@@ -291,7 +291,10 @@ bot.on("message", (msg) => {
   if (!msg.text) return;
   trackUser(msg);
   if (IS_PRIVATE && !isAuthorized(msg.chat.id) && msg.text.startsWith("/") &&
-      !msg.text.startsWith("/start") && !msg.text.startsWith("/access")) {
+      !msg.text.startsWith("/start") && !msg.text.startsWith("/access") &&
+      !msg.text.startsWith("/admin") && !msg.text.startsWith("/users") &&
+      !msg.text.startsWith("/broadcast") && !msg.text.startsWith("/grant") &&
+      !msg.text.startsWith("/revoke")) {
     blockedMsgs.add(msg.message_id);
     bot.sendMessage(msg.chat.id, "🔒 This bot is private.\n\nSend /access YOUR_CODE to unlock.");
   }
