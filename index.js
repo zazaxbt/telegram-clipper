@@ -284,6 +284,26 @@ bot.onText(/^\/revoke\s+(\d+)$/, (msg, match) => {
   }
 });
 
+// Global auth check — block unauthorized users from ALL commands except /start and /access
+const blockedMsgs = new Set();
+bot.on("message", (msg) => {
+  if (!msg.text) return;
+  trackUser(msg);
+  if (IS_PRIVATE && !isAuthorized(msg.chat.id) && msg.text.startsWith("/") &&
+      !msg.text.startsWith("/start") && !msg.text.startsWith("/access")) {
+    blockedMsgs.add(msg.message_id);
+    bot.sendMessage(msg.chat.id, "🔒 This bot is private.\n\nSend /access YOUR_CODE to unlock.");
+  }
+});
+
+// Also block unauthorized video/file/audio uploads
+bot.on("video", (msg) => { trackUser(msg); if (IS_PRIVATE && !isAuthorized(msg.chat.id)) { blockedMsgs.add(msg.message_id); bot.sendMessage(msg.chat.id, "🔒 Send /access CODE first."); } });
+bot.on("document", (msg) => { trackUser(msg); if (IS_PRIVATE && !isAuthorized(msg.chat.id)) { blockedMsgs.add(msg.message_id); bot.sendMessage(msg.chat.id, "🔒 Send /access CODE first."); } });
+bot.on("audio", (msg) => { trackUser(msg); if (IS_PRIVATE && !isAuthorized(msg.chat.id)) { blockedMsgs.add(msg.message_id); bot.sendMessage(msg.chat.id, "🔒 Send /access CODE first."); } });
+
+// Helper to check if message was already blocked
+function isBlocked(msg) { if (blockedMsgs.has(msg.message_id)) { blockedMsgs.delete(msg.message_id); return true; } return false; }
+
 // Track user sessions
 const sessions = {};
 let processingLock = false;
@@ -292,6 +312,7 @@ let cancelRequested = {}; // Track cancel per chat
 
 // /stop - Cancel current operation
 bot.onText(/\/stop/, (msg) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   cancelRequested[chatId] = true;
 
@@ -315,6 +336,7 @@ bot.onText(/\/stop/, (msg) => {
 
 // /status - Show current session info
 bot.onText(/\/status/, (msg) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   const session = sessions[chatId];
   if (!session) {
@@ -368,9 +390,10 @@ const COMMANDS_TEXT = "📋 Commands:\n/clip - Auto-detect best moments\n/clip 6
 
 // Handle video uploads
 bot.on("video", async (msg) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   trackUser(msg);
-  if (!isAuthorized(chatId)) return bot.sendMessage(chatId, "🔒 Use /access CODE to unlock the bot.");
+  if (!isAuthorized(chatId)) return;
   trackStat(chatId, "video");
   const fileId = msg.video.file_id;
   const fileSize = msg.video.file_size || 0;
@@ -396,6 +419,7 @@ bot.on("video", async (msg) => {
 
 // Handle document videos (when sent as file)
 bot.on("document", async (msg) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   const mime = msg.document.mime_type || "";
   if (!mime.startsWith("video/")) return;
@@ -460,6 +484,7 @@ bot.on("voice", async (msg) => {
 
 // Handle direct video URLs
 bot.onText(/^(https?:\/\/\S+\.(mp4|mkv|avi|mov|webm)(\?\S*)?)$/i, async (msg, match) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   const url = match[1];
 
@@ -479,6 +504,7 @@ bot.onText(/^(https?:\/\/\S+\.(mp4|mkv|avi|mov|webm)(\?\S*)?)$/i, async (msg, ma
 // Handle YouTube, Twitter/X, Instagram, TikTok, and other social media URLs
 const socialPattern = /^(https?:\/\/\S*(youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|tiktok\.com|facebook\.com|fb\.watch|vimeo\.com|reddit\.com|twitch\.tv|drive\.google\.com)\S*)$/i;
 bot.onText(socialPattern, async (msg, match) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   const url = match[1];
 
@@ -508,6 +534,7 @@ bot.onText(socialPattern, async (msg, match) => {
 
 // Set number of clips
 bot.onText(/^\/clips(?:\s+(\d+))?$/, (msg, match) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   if (!sessions[chatId]) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) {
@@ -519,6 +546,7 @@ bot.onText(/^\/clips(?:\s+(\d+))?$/, (msg, match) => {
 
 // Set clip duration
 bot.onText(/^\/duration(?:\s+(\d+))?$/, (msg, match) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   if (!sessions[chatId]) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) {
@@ -563,6 +591,7 @@ async function updateProgress(chatId, msgId, text) {
 
 // Auto clip
 bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   const session = sessions[chatId];
   if (!session || !session.videoPath) {
@@ -691,6 +720,7 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
 
 // Q&A clip — transcribe, find questions, clip answers with question as caption
 bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   const session = sessions[chatId];
   if (!session || !session.videoPath) {
@@ -758,11 +788,13 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
 
 // Manual cut - show usage if no args
 bot.onText(/^\/cut$/, (msg) => {
+  if (isBlocked(msg)) return;
   bot.sendMessage(msg.chat.id, `🔪 *Manual Cut*\n\nUsage: /cut START END\n\nExamples:\n/cut 00:01:30 00:02:45\n/cut 90 165\n/cut 1:30 2:45`, { parse_mode: "Markdown" });
 });
 
 // Manual cut with arguments
 bot.onText(/\/cut\s+(\S+)\s+(\S+)/, async (msg, match) => {
+  if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
   const session = sessions[chatId];
   if (!session || !session.videoPath) {
@@ -846,6 +878,7 @@ bot.onText(/^\/edit$/, (msg) => {
 bot.onText(/^\/speed(?:\s+([\d.]+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId, "Usage: /speed 1.5\n\nExamples:\n/speed 0.5 (slow motion)\n/speed 2 (2x fast)\n/speed 0.25 (super slow)");
 
@@ -878,6 +911,7 @@ bot.onText(/^\/speed(?:\s+([\d.]+))?$/, async (msg, match) => {
 bot.onText(/^\/mute$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
 
   try {
@@ -904,6 +938,7 @@ bot.onText(/^\/mute$/, async (msg) => {
 bot.onText(/^\/audio$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
 
   try {
@@ -930,6 +965,7 @@ bot.onText(/^\/audio$/, async (msg) => {
 bot.onText(/^\/text\s+(.+)$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
 
   const text = match[1].replace(/'/g, "\\'");
@@ -966,6 +1002,7 @@ bot.onText(/^\/text$/, (msg) => {
 bot.onText(/^\/crop(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId, "Usage: /crop RATIO\n\nExamples:\n/crop 9:16 (TikTok/Reels)\n/crop 1:1 (Square)\n/crop 16:9 (YouTube)\n/crop 4:5 (Instagram)");
 
@@ -998,6 +1035,7 @@ bot.onText(/^\/crop(?:\s+(\S+))?$/, async (msg, match) => {
 bot.onText(/^\/filter(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId,
     "Usage: /filter NAME\n\n" +
@@ -1054,6 +1092,7 @@ bot.onText(/^\/filter(?:\s+(\S+))?$/, async (msg, match) => {
 bot.onText(/^\/gif$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
 
   try {
@@ -1080,6 +1119,7 @@ bot.onText(/^\/gif$/, async (msg) => {
 bot.onText(/^\/compress$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
 
   try {
@@ -1108,6 +1148,7 @@ bot.onText(/^\/compress$/, async (msg) => {
 bot.onText(/^\/volume(?:\s+([\d.]+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId, "Usage: /volume 1.5\n\nExamples:\n/volume 0.5 (50% quieter)\n/volume 2 (2x louder)\n/volume 3 (3x louder)");
 
@@ -1138,6 +1179,7 @@ bot.onText(/^\/volume(?:\s+([\d.]+))?$/, async (msg, match) => {
 bot.onText(/^\/resize(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId, "Usage: /resize WIDTHxHEIGHT\n\nExamples:\n/resize 1920x1080\n/resize 1280x720\n/resize 640x480");
 
@@ -1217,6 +1259,7 @@ bot.onText(/^\/merge$/, async (msg) => {
 bot.onText(/^\/reverse$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   try {
     bot.sendMessage(chatId, "⏪ Reversing video...");
@@ -1235,6 +1278,7 @@ bot.onText(/^\/reverse$/, async (msg) => {
 bot.onText(/^\/fade(?:\s+([\d.]+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   const fadeDur = parseFloat(match[1]) || 1;
   try {
@@ -1260,6 +1304,7 @@ bot.onText(/^\/fade(?:\s+([\d.]+))?$/, async (msg, match) => {
 bot.onText(/^\/boomerang$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   try {
     bot.sendMessage(chatId, "🔁 Creating boomerang...");
@@ -1294,6 +1339,7 @@ bot.onText(/^\/boomerang$/, async (msg) => {
 bot.onText(/^\/zoom(?:\s+(in|out))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   const direction = (match[1] || "in").toLowerCase();
   try {
@@ -1316,6 +1362,7 @@ bot.onText(/^\/zoom(?:\s+(in|out))?$/, async (msg, match) => {
 bot.onText(/^\/stabilize$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   try {
     bot.sendMessage(chatId, "🎞️ Stabilizing video (2 passes)...\n⏳ This may take a while...");
@@ -1345,6 +1392,7 @@ bot.onText(/^\/stabilize$/, async (msg) => {
 bot.onText(/^\/caption$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   try {
     const statusMsg = await bot.sendMessage(chatId, "🎤 Generating AI captions...\n\n📊 Step 1/3: Extracting audio...");
@@ -1400,6 +1448,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
 bot.onText(/^\/music(?:\s+([\d.]+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!session.audioPath) return bot.sendMessage(chatId, "🎵 Send an audio file first, then use /music to overlay it.\n\nOptional: /music 0.3 (set music volume, default 0.3)");
   const musicVol = parseFloat(match[1]) || 0.3;
@@ -1425,6 +1474,7 @@ bot.onText(/^\/music(?:\s+([\d.]+))?$/, async (msg, match) => {
 bot.onText(/^\/voice(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId,
     "🎭 *Voice Effects*\n\n" +
@@ -1468,6 +1518,7 @@ bot.onText(/^\/voice(?:\s+(\S+))?$/, async (msg, match) => {
 bot.onText(/^\/colorgrade(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId,
     "🎨 *Color Grading*\n\n" +
@@ -1511,6 +1562,7 @@ bot.onText(/^\/colorgrade(?:\s+(\S+))?$/, async (msg, match) => {
 bot.onText(/^\/speedramp$/, async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   try {
     bot.sendMessage(chatId, "⏩ Creating speed ramp (slow → fast → slow)...");
@@ -1559,6 +1611,7 @@ bot.onText(/^\/speedramp$/, async (msg) => {
 bot.onText(/^\/pip(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!session.secondVideoPath) return bot.sendMessage(chatId, "📌 Send a second video first, then use /pip.\n\nThe second video will be overlaid as a small box.\n\nPositions: /pip topright /pip topleft /pip bottomright /pip bottomleft");
   const position = (match[1] || "bottomright").toLowerCase();
@@ -1590,6 +1643,7 @@ bot.onText(/^\/pip(?:\s+(\S+))?$/, async (msg, match) => {
 bot.onText(/^\/split(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!session.secondVideoPath) return bot.sendMessage(chatId, "🎭 Send a second video first, then use /split.\n\nOptions: /split horizontal /split vertical");
   const layout = (match[1] || "horizontal").toLowerCase();
@@ -1613,6 +1667,7 @@ bot.onText(/^\/split(?:\s+(\S+))?$/, async (msg, match) => {
 bot.onText(/^\/bgremove(?:\s+(\S+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   const color = (match[1] || "green").toLowerCase();
   const colors = { green: "0x00FF00", blue: "0x0000FF", white: "0xFFFFFF", red: "0xFF0000" };
@@ -1634,6 +1689,7 @@ bot.onText(/^\/bgremove(?:\s+(\S+))?$/, async (msg, match) => {
 bot.onText(/^\/loop(?:\s+(\d+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   if (!match[1]) return bot.sendMessage(chatId, "Usage: /loop 3\n\nLoops the video N times (max 10).");
   const loops = Math.min(parseInt(match[1]), 10);
@@ -1657,6 +1713,7 @@ bot.onText(/^\/loop(?:\s+(\d+))?$/, async (msg, match) => {
 bot.onText(/^\/thumbnail(?:\s+([\d:.]+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   const session = sessions[chatId];
+  if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   const time = match[1] ? parseTime(match[1]) || 5 : 5;
   try {
