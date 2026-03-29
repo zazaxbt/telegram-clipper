@@ -740,18 +740,44 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
   try {
     const videoDuration = await getVideoDuration(session.videoPath);
     const estMinutes = Math.ceil(videoDuration / 60);
-    bot.sendMessage(chatId, `🎙️ Transcribing video (~${estMinutes} min video)...\n⏳ Estimated time: ${estMinutes}-${estMinutes * 2} minutes`);
 
-    // Extract audio as WAV for Whisper
-    bot.sendMessage(chatId, "📊 Step 1/3: Extracting audio...");
-    const wavPath = path.join(TEMP_DIR, `audio_${chatId}.wav`);
-    await extractAudio(session.videoPath, wavPath);
+    // Process in 5-minute chunks to avoid OOM
+    const CHUNK_MINS = 5;
+    const CHUNK_SECS = CHUNK_MINS * 60;
+    const totalChunks = Math.ceil(videoDuration / CHUNK_SECS);
 
-    // Transcribe with timestamps using Python whisper
-    bot.sendMessage(chatId, "📊 Step 2/3: Running AI transcription (this is the slow part)...");
-    const chunks = await transcribeWithWhisper(wavPath);
+    bot.sendMessage(chatId, `🎙️ Transcribing ~${estMinutes} min video in ${totalChunks} chunks...\n⏳ Processing ${CHUNK_MINS} minutes at a time to save memory`);
 
-    fs.unlinkSync(wavPath);
+    let allChunks = [];
+    for (let c = 0; c < totalChunks; c++) {
+      if (cancelRequested[chatId]) break;
+      const offset = c * CHUNK_SECS;
+      bot.sendMessage(chatId, `📊 Chunk ${c + 1}/${totalChunks}: Extracting audio (${formatTime(offset)} - ${formatTime(Math.min(offset + CHUNK_SECS, videoDuration))})...`);
+
+      const wavPath = path.join(TEMP_DIR, `audio_${chatId}_${c}.wav`);
+      // Extract only this chunk
+      await new Promise((resolve, reject) => {
+        ffmpeg(session.videoPath).output(wavPath)
+          .outputOptions(["-ss", String(offset), "-t", String(CHUNK_SECS), "-ar", "16000", "-ac", "1", "-f", "wav"])
+          .on("end", resolve).on("error", reject).run();
+      });
+
+      bot.sendMessage(chatId, `📊 Chunk ${c + 1}/${totalChunks}: Transcribing with AI...`);
+      try {
+        const chunks = await transcribeWithWhisper(wavPath);
+        // Adjust timestamps to absolute video time
+        for (const chunk of chunks) {
+          chunk.timestamp[0] += offset;
+          chunk.timestamp[1] += offset;
+        }
+        allChunks = allChunks.concat(chunks);
+      } catch (err) {
+        bot.sendMessage(chatId, `⚠️ Chunk ${c + 1} failed: ${err.message}. Skipping...`);
+      }
+      try { fs.unlinkSync(wavPath); } catch {}
+    }
+
+    const chunks = allChunks;
 
     // Find questions in the transcript
     bot.sendMessage(chatId, `📊 Step 3/3: Found ${chunks.length} text segments. Searching for Q&A moments...`);
@@ -1399,13 +1425,33 @@ bot.onText(/^\/caption$/, async (msg) => {
   if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   try {
-    const statusMsg = await bot.sendMessage(chatId, "🎤 Generating AI captions...\n\n📊 Step 1/3: Extracting audio...");
-    const wavPath = path.join(TEMP_DIR, `caption_audio_${chatId}.wav`);
-    await extractAudio(session.videoPath, wavPath);
+    const statusMsg = await bot.sendMessage(chatId, "🎤 Generating AI captions...\n\n📊 Extracting & transcribing in chunks...");
+    const videoDuration = await getVideoDuration(session.videoPath);
+    const CHUNK_MINS = 5;
+    const CHUNK_SECS = CHUNK_MINS * 60;
+    const totalChunks = Math.ceil(videoDuration / CHUNK_SECS);
 
-    await updateProgress(chatId, statusMsg.message_id, "🎤 Generating AI captions...\n\n📊 Step 2/3: Transcribing with AI...\n⏳ This is the slow part...");
-    const chunks = await transcribeWithWhisper(wavPath);
-    fs.unlinkSync(wavPath);
+    let chunks = [];
+    for (let c = 0; c < totalChunks; c++) {
+      const offset = c * CHUNK_SECS;
+      await updateProgress(chatId, statusMsg.message_id,
+        `🎤 Generating AI captions...\n\n📊 Chunk ${c + 1}/${totalChunks}: ${formatTime(offset)} - ${formatTime(Math.min(offset + CHUNK_SECS, videoDuration))}`
+      );
+      const wavPath = path.join(TEMP_DIR, `caption_audio_${chatId}_${c}.wav`);
+      await new Promise((resolve, reject) => {
+        ffmpeg(session.videoPath).output(wavPath)
+          .outputOptions(["-ss", String(offset), "-t", String(CHUNK_SECS), "-ar", "16000", "-ac", "1", "-f", "wav"])
+          .on("end", resolve).on("error", reject).run();
+      });
+      try {
+        const result = await transcribeWithWhisper(wavPath);
+        for (const chunk of result) { chunk.timestamp[0] += offset; chunk.timestamp[1] += offset; }
+        chunks = chunks.concat(result);
+      } catch (err) {
+        await updateProgress(chatId, statusMsg.message_id, `⚠️ Chunk ${c + 1} failed: ${err.message}. Continuing...`);
+      }
+      try { fs.unlinkSync(wavPath); } catch {}
+    }
 
     if (!chunks || chunks.length === 0) {
       return updateProgress(chatId, statusMsg.message_id, "❌ No speech detected in the video.");
@@ -1992,14 +2038,13 @@ function transcribeWithWhisper(wavPath) {
   });
 }
 
-function extractAudio(videoPath, wavPath) {
+function extractAudio(videoPath, wavPath, maxDuration) {
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
+    const cmd = ffmpeg(videoPath)
       .output(wavPath)
-      .outputOptions(["-ar", "16000", "-ac", "1", "-f", "wav"])
-      .on("end", resolve)
-      .on("error", reject)
-      .run();
+      .outputOptions(["-ar", "16000", "-ac", "1", "-f", "wav"]);
+    if (maxDuration) cmd.outputOptions(["-t", String(maxDuration)]);
+    cmd.on("end", resolve).on("error", reject).run();
   });
 }
 
