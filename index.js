@@ -111,6 +111,72 @@ async function initGramClient() {
 
 initGramClient().catch((err) => console.error("GramJS init failed:", err.message));
 
+// Smart video sender: tries Bot API first, falls back to GramJS for large files
+async function sendVideoSmart(chatId, filePath, options = {}) {
+  const fileSize = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+  const MAX_BOT_API = 49 * 1024 * 1024; // ~49MB safe limit
+
+  // If file is small enough, use Bot API directly
+  if (fileSize < MAX_BOT_API) {
+    return bot.sendVideo(chatId, filePath, options);
+  }
+
+  // File too large — use GramJS
+  if (!gramClient) {
+    // Try to compress first
+    const compressedPath = filePath.replace(/\.mp4$/, '_compressed.mp4');
+    await new Promise((resolve, reject) => {
+      ffmpeg(filePath).output(compressedPath)
+        .outputOptions(['-c:v', 'libx264', '-crf', '32', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart'])
+        .on('end', resolve).on('error', reject).run();
+    });
+
+    const compSize = fs.existsSync(compressedPath) ? fs.statSync(compressedPath).size : 0;
+    if (compSize > 0 && compSize < MAX_BOT_API) {
+      const result = await bot.sendVideo(chatId, compressedPath, options);
+      try { fs.unlinkSync(compressedPath); } catch {}
+      return result;
+    }
+    try { fs.unlinkSync(compressedPath); } catch {}
+
+    throw new Error("File too large (>50MB). GramJS not available — set TELEGRAM_API_ID and TELEGRAM_API_HASH to enable large uploads.");
+  }
+
+  // Upload via GramJS
+  console.log(`📤 Uploading ${(fileSize / 1024 / 1024).toFixed(1)}MB via GramJS...`);
+  try {
+    await gramClient.sendFile(chatId, {
+      file: filePath,
+      caption: options.caption || "",
+      forceDocument: false,
+      workers: 4,
+      progressCallback: (progress) => {
+        console.log(`📤 Upload progress: ${(progress * 100).toFixed(0)}%`);
+      },
+    });
+    return true;
+  } catch (gramErr) {
+    console.error("GramJS upload error:", gramErr.message);
+    // If GramJS also fails, try to compress and send via Bot API
+    const compressedPath = filePath.replace(/\.mp4$/, '_compressed.mp4');
+    await new Promise((resolve, reject) => {
+      ffmpeg(filePath).output(compressedPath)
+        .outputOptions(['-c:v', 'libx264', '-crf', '35', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '64k', '-vf', 'scale=720:-2', '-movflags', '+faststart'])
+        .on('end', resolve).on('error', reject).run();
+    });
+
+    const compSize = fs.existsSync(compressedPath) ? fs.statSync(compressedPath).size : 0;
+    if (compSize > 0 && compSize < MAX_BOT_API) {
+      await bot.sendMessage(chatId, "⚠️ File was too large — sending compressed version.");
+      const result = await bot.sendVideo(chatId, compressedPath, options);
+      try { fs.unlinkSync(compressedPath); } catch {}
+      return result;
+    }
+    try { fs.unlinkSync(compressedPath); } catch {}
+    throw new Error(`File too large to send (${(fileSize / 1024 / 1024).toFixed(1)}MB). Try /compress first to reduce size.`);
+  }
+}
+
 // Whisper transcription via Python (lightweight, runs on demand)
 
 // =============================================
@@ -692,7 +758,7 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
 
       await cutVideo(session.videoPath, start, end, outPath);
 
-      await bot.sendVideo(chatId, outPath, {
+      await sendVideoSmart(chatId, outPath, {
         caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)`,
       });
 
@@ -796,7 +862,7 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
       await cutVideo(session.videoPath, start, end, outPath);
 
       const caption = `❓ ${question}\n\n🎬 Clip ${i + 1}/${qaClips.length} (${formatTime(start)} → ${formatTime(end)})`;
-      await bot.sendVideo(chatId, outPath, {
+      await sendVideoSmart(chatId, outPath, {
         caption: caption.slice(0, 1024), // Telegram caption limit
       });
 
@@ -841,7 +907,7 @@ bot.onText(/\/cut\s+(\S+)\s+(\S+)/, async (msg, match) => {
     bot.sendMessage(chatId, `✂️ Cutting ${formatTime(start)} → ${formatTime(end)}...`);
     const outPath = path.join(TEMP_DIR, `manual_${chatId}.mp4`);
     await cutVideo(session.videoPath, start, end, outPath);
-    await bot.sendVideo(chatId, outPath, {
+    await sendVideoSmart(chatId, outPath, {
       caption: `🎬 Clip (${formatTime(start)} → ${formatTime(end)})`,
     });
     fs.unlinkSync(outPath);
@@ -930,7 +996,7 @@ bot.onText(/^\/speed(?:\s+([\d.]+))?$/, async (msg, match) => {
         .run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: `⚡ Speed: ${speed}x` });
+    await sendVideoSmart(chatId, outPath, { caption: `⚡ Speed: ${speed}x` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -957,7 +1023,7 @@ bot.onText(/^\/mute$/, async (msg) => {
         .run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: "🔇 Audio removed" });
+    await sendVideoSmart(chatId, outPath, { caption: "🔇 Audio removed" });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1017,7 +1083,7 @@ bot.onText(/^\/text\s+(.+)$/, async (msg, match) => {
         .run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: `📝 Text: "${match[1]}"` });
+    await sendVideoSmart(chatId, outPath, { caption: `📝 Text: "${match[1]}"` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1054,7 +1120,7 @@ bot.onText(/^\/crop(?:\s+(\S+))?$/, async (msg, match) => {
         .run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: `📐 Cropped to ${ratio}` });
+    await sendVideoSmart(chatId, outPath, { caption: `📐 Cropped to ${ratio}` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1111,7 +1177,7 @@ bot.onText(/^\/filter(?:\s+(\S+))?$/, async (msg, match) => {
         .run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: `🎨 Filter: ${filterName}` });
+    await sendVideoSmart(chatId, outPath, { caption: `🎨 Filter: ${filterName}` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1167,7 +1233,7 @@ bot.onText(/^\/compress$/, async (msg) => {
     });
 
     const newSize = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1);
-    await bot.sendVideo(chatId, outPath, { caption: `📉 Compressed: ${origSize} MB → ${newSize} MB` });
+    await sendVideoSmart(chatId, outPath, { caption: `📉 Compressed: ${origSize} MB → ${newSize} MB` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1198,7 +1264,7 @@ bot.onText(/^\/volume(?:\s+([\d.]+))?$/, async (msg, match) => {
         .run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: `🔊 Volume: ${vol}x` });
+    await sendVideoSmart(chatId, outPath, { caption: `🔊 Volume: ${vol}x` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1229,7 +1295,7 @@ bot.onText(/^\/resize(?:\s+(\S+))?$/, async (msg, match) => {
         .run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: `📐 Resized to ${w}x${h}` });
+    await sendVideoSmart(chatId, outPath, { caption: `📐 Resized to ${w}x${h}` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1274,7 +1340,7 @@ bot.onText(/^\/merge$/, async (msg) => {
     });
 
     fs.unlinkSync(listPath);
-    await bot.sendVideo(chatId, outPath, { caption: `🔗 Merged ${session.mergeList.length} videos` });
+    await sendVideoSmart(chatId, outPath, { caption: `🔗 Merged ${session.mergeList.length} videos` });
     fs.unlinkSync(outPath);
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
@@ -1299,7 +1365,7 @@ bot.onText(/^\/reverse$/, async (msg) => {
         .outputOptions(["-vf", "reverse", "-af", "areverse", "-preset", "ultrafast"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: "⏪ Reversed" });
+    await sendVideoSmart(chatId, outPath, { caption: "⏪ Reversed" });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1325,7 +1391,7 @@ bot.onText(/^\/fade(?:\s+([\d.]+))?$/, async (msg, match) => {
         ])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🌅 Fade in/out (${fadeDur}s)` });
+    await sendVideoSmart(chatId, outPath, { caption: `🌅 Fade in/out (${fadeDur}s)` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1360,7 +1426,7 @@ bot.onText(/^\/boomerang$/, async (msg) => {
         .outputOptions(["-c", "copy"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: "🔁 Boomerang" });
+    await sendVideoSmart(chatId, outPath, { caption: "🔁 Boomerang" });
     [fwd, rev, listPath, outPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1383,7 +1449,7 @@ bot.onText(/^\/zoom(?:\s+(in|out))?$/, async (msg, match) => {
         .outputOptions(["-vf", zoomFilter, "-c:a", "copy", "-preset", "ultrafast", "-t", "10"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🔍 Zoom ${direction}` });
+    await sendVideoSmart(chatId, outPath, { caption: `🔍 Zoom ${direction}` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1413,7 +1479,7 @@ bot.onText(/^\/stabilize$/, async (msg) => {
         .outputOptions(["-vf", `vidstabtransform=input=${transformPath}:smoothing=10,unsharp=5:5:0.8:3:3:0.4`, "-preset", "ultrafast"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: "🎞️ Stabilized" });
+    await sendVideoSmart(chatId, outPath, { caption: "🎞️ Stabilized" });
     [outPath, transformPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1488,7 +1554,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
         .on("end", resolve).on("error", reject).run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: `🎤 Auto-captioned (${chunks.length} segments)` });
+    await sendVideoSmart(chatId, outPath, { caption: `🎤 Auto-captioned (${chunks.length} segments)` });
     [outPath, assPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
     await updateProgress(chatId, statusMsg.message_id, `✅ Captions added! ${chunks.length} segments burned onto video.`);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
@@ -1663,7 +1729,7 @@ bot.onText(/^\/music(?:\s+([\d.]+))?$/, async (msg, match) => {
         ])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🎵 Background music added (vol: ${musicVol})` });
+    await sendVideoSmart(chatId, outPath, { caption: `🎵 Background music added (vol: ${musicVol})` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1707,7 +1773,7 @@ bot.onText(/^\/voice(?:\s+(\S+))?$/, async (msg, match) => {
         .outputOptions(["-af", effects[effect], "-c:v", "copy", "-preset", "ultrafast"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🎭 Voice: ${effect}` });
+    await sendVideoSmart(chatId, outPath, { caption: `🎭 Voice: ${effect}` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1751,7 +1817,7 @@ bot.onText(/^\/colorgrade(?:\s+(\S+))?$/, async (msg, match) => {
         .outputOptions(["-vf", grades[grade], "-c:a", "copy", "-preset", "ultrafast"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🎨 Color grade: ${grade}` });
+    await sendVideoSmart(chatId, outPath, { caption: `🎨 Color grade: ${grade}` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1800,7 +1866,7 @@ bot.onText(/^\/speedramp$/, async (msg) => {
         .on("end", resolve).on("error", reject).run();
     });
 
-    await bot.sendVideo(chatId, outPath, { caption: "⏩ Speed ramp: slow → fast → slow" });
+    await sendVideoSmart(chatId, outPath, { caption: "⏩ Speed ramp: slow → fast → slow" });
     [p1, p2, p3, listPath, outPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1832,7 +1898,7 @@ bot.onText(/^\/pip(?:\s+(\S+))?$/, async (msg, match) => {
         ])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `📌 Picture-in-picture (${position})` });
+    await sendVideoSmart(chatId, outPath, { caption: `📌 Picture-in-picture (${position})` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1856,7 +1922,7 @@ bot.onText(/^\/split(?:\s+(\S+))?$/, async (msg, match) => {
         .outputOptions(["-filter_complex", filter, "-map", "[out]", "-map", "0:a?", "-preset", "ultrafast", "-shortest"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🎭 Split screen (${layout})` });
+    await sendVideoSmart(chatId, outPath, { caption: `🎭 Split screen (${layout})` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1878,7 +1944,7 @@ bot.onText(/^\/bgremove(?:\s+(\S+))?$/, async (msg, match) => {
         .outputOptions(["-vf", `chromakey=${colors[color]}:0.15:0.15`, "-c:a", "copy", "-preset", "ultrafast"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🟢 ${color} background removed` });
+    await sendVideoSmart(chatId, outPath, { caption: `🟢 ${color} background removed` });
     fs.unlinkSync(outPath);
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
@@ -1902,7 +1968,7 @@ bot.onText(/^\/loop(?:\s+(\d+))?$/, async (msg, match) => {
         .outputOptions(["-c", "copy"])
         .on("end", resolve).on("error", reject).run();
     });
-    await bot.sendVideo(chatId, outPath, { caption: `🔁 Looped ${loops}x` });
+    await sendVideoSmart(chatId, outPath, { caption: `🔁 Looped ${loops}x` });
     [outPath, listPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
