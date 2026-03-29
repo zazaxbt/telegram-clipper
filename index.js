@@ -41,13 +41,27 @@ const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
       { command: 'speed', description: '⚡ Change speed (0.5, 1.5, 2)' },
       { command: 'mute', description: '🔇 Remove audio' },
       { command: 'audio', description: '🎵 Extract audio as MP3' },
+      { command: 'caption', description: '🎤 Auto-generate captions (AI)' },
       { command: 'text', description: '📝 Add text overlay' },
       { command: 'crop', description: '📐 Crop (9:16, 1:1, 16:9)' },
       { command: 'filter', description: '🎨 Apply visual filter' },
+      { command: 'colorgrade', description: '🎨 Cinematic color grading' },
+      { command: 'reverse', description: '⏪ Play video backwards' },
+      { command: 'fade', description: '🌅 Add fade in/out' },
+      { command: 'zoom', description: '🔍 Smooth zoom effect' },
+      { command: 'boomerang', description: '🔁 Forward-reverse loop' },
+      { command: 'voice', description: '🎭 Voice effects' },
+      { command: 'music', description: '🎵 Add background music' },
+      { command: 'speedramp', description: '⏩ Speed ramp effect' },
+      { command: 'stabilize', description: '🎞️ Stabilize shaky video' },
+      { command: 'pip', description: '📌 Picture-in-picture' },
+      { command: 'split', description: '🎭 Split screen' },
       { command: 'gif', description: '🎞️ Convert to GIF' },
       { command: 'compress', description: '📉 Reduce file size' },
       { command: 'volume', description: '🔊 Adjust volume' },
       { command: 'resize', description: '📐 Resize video' },
+      { command: 'loop', description: '🔁 Loop video N times' },
+      { command: 'thumbnail', description: '🖼️ Extract thumbnail' },
       { command: 'merge', description: '🔗 Merge multiple videos' },
       { command: 'stop', description: '🛑 Cancel current operation' },
       { command: 'status', description: '📊 Show session info' },
@@ -159,7 +173,11 @@ bot.onText(/\/start/, (msg) => {
       `/clips 5 - Set number of clips\n` +
       `/duration 60 - Set max clip duration\n\n` +
       `*🎬 Editing:*\n` +
-      `/edit - Show all editing commands\n\n` +
+      `/edit - Show all editing commands\n` +
+      `/caption - AI auto-captions (CapCut style)\n` +
+      `/colorgrade - Cinematic color grading\n` +
+      `/reverse - Play backwards\n` +
+      `/speedramp - Speed ramp effect\n\n` +
       `*⚙️ General:*\n` +
       `/stop - Cancel current operation\n` +
       `/status - Show session info\n\n` +
@@ -183,7 +201,13 @@ bot.on("video", async (msg) => {
     const filePath = await downloadTelegramFile(fileId, msg);
     const dlTime = ((Date.now() - startTime) / 1000).toFixed(1);
     await updateProgress(chatId, dlMsg.message_id, `✅ Video received! (${sizeMB} MB in ${dlTime}s)\n\n${COMMANDS_TEXT}`);
-    sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
+    if (sessions[chatId] && sessions[chatId].videoPath) {
+      // Second video — save for /pip and /split
+      sessions[chatId].secondVideoPath = filePath;
+      bot.sendMessage(chatId, "📌 Second video saved! Use /pip or /split to combine them.");
+    } else {
+      sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
+    }
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
   }
@@ -203,9 +227,53 @@ bot.on("document", async (msg) => {
     const filePath = await downloadTelegramFile(msg.document.file_id, msg);
     const dlTime = ((Date.now() - startTime) / 1000).toFixed(1);
     await updateProgress(chatId, dlMsg.message_id, `✅ Video received! (${sizeMB} MB in ${dlTime}s)\n\n${COMMANDS_TEXT}`);
-    sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
+    if (sessions[chatId] && sessions[chatId].videoPath) {
+      sessions[chatId].secondVideoPath = filePath;
+      bot.sendMessage(chatId, "📌 Second video saved! Use /pip or /split to combine them.");
+    } else {
+      sessions[chatId] = { videoPath: filePath, clipCount: 3, clipDuration: 30 };
+    }
   } catch (err) {
     bot.sendMessage(chatId, `❌ Failed to download: ${err.message}`);
+  }
+});
+
+// Handle audio uploads (for /music command)
+bot.on("audio", async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    const file = await bot.getFile(msg.audio.file_id);
+    const url = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const ext = path.extname(file.file_path) || ".mp3";
+    const dest = path.join(TEMP_DIR, `music_${chatId}${ext}`);
+    await new Promise((resolve, reject) => {
+      const ws = fs.createWriteStream(dest);
+      https.get(url, (res) => { res.pipe(ws); ws.on("finish", () => { ws.close(); resolve(); }); }).on("error", reject);
+    });
+    if (!sessions[chatId]) sessions[chatId] = {};
+    sessions[chatId].audioPath = dest;
+    bot.sendMessage(chatId, "🎵 Audio saved! Now use /music to add it as background music to your video.");
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Failed to save audio: ${err.message}`);
+  }
+});
+
+// Handle voice messages (for /music command)
+bot.on("voice", async (msg) => {
+  const chatId = msg.chat.id;
+  try {
+    const file = await bot.getFile(msg.voice.file_id);
+    const url = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const dest = path.join(TEMP_DIR, `music_${chatId}.ogg`);
+    await new Promise((resolve, reject) => {
+      const ws = fs.createWriteStream(dest);
+      https.get(url, (res) => { res.pipe(ws); ws.on("finish", () => { ws.close(); resolve(); }); }).on("error", reject);
+    });
+    if (!sessions[chatId]) sessions[chatId] = {};
+    sessions[chatId].audioPath = dest;
+    bot.sendMessage(chatId, "🎵 Audio saved! Now use /music to add it as background music.");
+  } catch (err) {
+    bot.sendMessage(chatId, `❌ Failed to save audio: ${err.message}`);
   }
 });
 
@@ -557,21 +625,38 @@ bot.onText(/^\/edit$/, (msg) => {
   }
   bot.sendMessage(chatId,
     `🎬 *Video Editor*\n\n` +
-    `*Basic:*\n` +
-    `/speed 1.5 - Change speed (0.5 = slow, 2 = fast)\n` +
+    `*⚡ Speed & Time:*\n` +
+    `/speed 1.5 - Change speed\n` +
+    `/reverse - Play backwards\n` +
+    `/boomerang - Forward-reverse loop\n` +
+    `/speedramp - Smooth speed ramp\n` +
+    `/loop 3 - Loop video N times\n\n` +
+    `*🎨 Visual & Color:*\n` +
+    `/text Your Text - Text overlay\n` +
+    `/crop 9:16 - Crop (9:16, 1:1, 16:9)\n` +
+    `/filter grayscale - Visual filter\n` +
+    `/colorgrade cinematic - Color grading\n` +
+    `/fade - Fade in/out\n` +
+    `/zoom in - Smooth zoom effect\n\n` +
+    `*🎤 Audio:*\n` +
     `/mute - Remove audio\n` +
-    `/audio - Extract audio only (MP3)\n\n` +
-    `*Visual:*\n` +
-    `/text Your Text - Add text overlay\n` +
-    `/watermark - Add watermark (send image first)\n` +
-    `/crop 9:16 - Crop aspect ratio (9:16, 1:1, 16:9)\n` +
-    `/filter grayscale - Apply filter\n\n` +
-    `*Format:*\n` +
+    `/audio - Extract as MP3\n` +
+    `/volume 1.5 - Adjust volume\n` +
+    `/voice deep - Voice effects\n` +
+    `/music - Add background music\n\n` +
+    `*🤖 AI Features:*\n` +
+    `/caption - Auto-generate captions\n\n` +
+    `*🎬 Advanced:*\n` +
+    `/stabilize - Fix shaky footage\n` +
+    `/pip - Picture-in-picture\n` +
+    `/split - Split screen (2 videos)\n` +
+    `/bgremove green - Green screen removal\n` +
+    `/thumbnail 5 - Extract frame at time\n\n` +
+    `*📦 Format:*\n` +
     `/gif - Convert to GIF\n` +
     `/compress - Reduce file size\n` +
-    `/volume 1.5 - Adjust volume (0.5 = quieter, 2 = louder)\n` +
-    `/merge - Merge clips (send multiple videos first)\n` +
-    `/resize 1280x720 - Resize video`,
+    `/resize 1280x720 - Resize\n` +
+    `/merge - Merge videos`,
     { parse_mode: "Markdown" }
   );
 });
@@ -942,6 +1027,478 @@ bot.onText(/^\/merge$/, async (msg) => {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
   }
 });
+
+// =============================================
+// --- PRO EDITING TOOLS ---
+// =============================================
+
+// /reverse - Play video backwards
+bot.onText(/^\/reverse$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  try {
+    bot.sendMessage(chatId, "⏪ Reversing video...");
+    const outPath = path.join(TEMP_DIR, `reverse_${chatId}.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-vf", "reverse", "-af", "areverse", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: "⏪ Reversed" });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /fade - Fade in/out
+bot.onText(/^\/fade(?:\s+([\d.]+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  const fadeDur = parseFloat(match[1]) || 1;
+  try {
+    bot.sendMessage(chatId, `🌅 Adding ${fadeDur}s fade in/out...`);
+    const outPath = path.join(TEMP_DIR, `fade_${chatId}.mp4`);
+    const duration = await getVideoDuration(session.videoPath);
+    const fadeOut = duration - fadeDur;
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions([
+          "-vf", `fade=t=in:st=0:d=${fadeDur},fade=t=out:st=${fadeOut}:d=${fadeDur}`,
+          "-af", `afade=t=in:st=0:d=${fadeDur},afade=t=out:st=${fadeOut}:d=${fadeDur}`,
+          "-preset", "ultrafast"
+        ])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🌅 Fade in/out (${fadeDur}s)` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /boomerang - Forward then reverse
+bot.onText(/^\/boomerang$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  try {
+    bot.sendMessage(chatId, "🔁 Creating boomerang...");
+    const fwd = path.join(TEMP_DIR, `boom_fwd_${chatId}.mp4`);
+    const rev = path.join(TEMP_DIR, `boom_rev_${chatId}.mp4`);
+    const outPath = path.join(TEMP_DIR, `boomerang_${chatId}.mp4`);
+    // Limit to first 3 seconds
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(fwd)
+        .outputOptions(["-t", "3", "-c:v", "libx264", "-an", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await new Promise((resolve, reject) => {
+      ffmpeg(fwd).output(rev)
+        .outputOptions(["-vf", "reverse", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    // Concat forward + reverse
+    const listPath = path.join(TEMP_DIR, `boom_list_${chatId}.txt`);
+    fs.writeFileSync(listPath, `file '${fwd}'\nfile '${rev}'`);
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(listPath).inputOptions(["-f", "concat", "-safe", "0"]).output(outPath)
+        .outputOptions(["-c", "copy"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: "🔁 Boomerang" });
+    [fwd, rev, listPath, outPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /zoom - Smooth zoom in/out
+bot.onText(/^\/zoom(?:\s+(in|out))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  const direction = (match[1] || "in").toLowerCase();
+  try {
+    bot.sendMessage(chatId, `🔍 Applying smooth zoom ${direction}...`);
+    const outPath = path.join(TEMP_DIR, `zoom_${chatId}.mp4`);
+    const zoomFilter = direction === "in"
+      ? "zoompan=z='min(zoom+0.001,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1920x1080:fps=30"
+      : "zoompan=z='if(eq(on,1),1.5,max(zoom-0.001,1))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1920x1080:fps=30";
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-vf", zoomFilter, "-c:a", "copy", "-preset", "ultrafast", "-t", "10"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🔍 Zoom ${direction}` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /stabilize - Fix shaky footage
+bot.onText(/^\/stabilize$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  try {
+    bot.sendMessage(chatId, "🎞️ Stabilizing video (2 passes)...\n⏳ This may take a while...");
+    const outPath = path.join(TEMP_DIR, `stable_${chatId}.mp4`);
+    const transformPath = path.join(TEMP_DIR, `transforms_${chatId}.trf`);
+    // Pass 1: Detect motion
+    await new Promise((resolve, reject) => {
+      const proc = spawn("ffmpeg", [
+        "-i", session.videoPath, "-vf", `vidstabdetect=stepsize=6:shakiness=8:result=${transformPath}`,
+        "-f", "null", "-"
+      ], { stdio: "pipe" });
+      proc.on("close", (code) => code === 0 ? resolve() : reject(new Error("Stabilize pass 1 failed")));
+      proc.on("error", reject);
+    });
+    // Pass 2: Apply stabilization
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-vf", `vidstabtransform=input=${transformPath}:smoothing=10,unsharp=5:5:0.8:3:3:0.4`, "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: "🎞️ Stabilized" });
+    [outPath, transformPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /caption - Auto-generate AI captions (CapCut style)
+bot.onText(/^\/caption$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  try {
+    const statusMsg = await bot.sendMessage(chatId, "🎤 Generating AI captions...\n\n📊 Step 1/3: Extracting audio...");
+    const wavPath = path.join(TEMP_DIR, `caption_audio_${chatId}.wav`);
+    await extractAudio(session.videoPath, wavPath);
+
+    await updateProgress(chatId, statusMsg.message_id, "🎤 Generating AI captions...\n\n📊 Step 2/3: Transcribing with AI...\n⏳ This is the slow part...");
+    const chunks = await transcribeWithWhisper(wavPath);
+    fs.unlinkSync(wavPath);
+
+    if (!chunks || chunks.length === 0) {
+      return updateProgress(chatId, statusMsg.message_id, "❌ No speech detected in the video.");
+    }
+
+    await updateProgress(chatId, statusMsg.message_id, `🎤 Generating AI captions...\n\n📊 Step 3/3: Burning ${chunks.length} subtitles onto video...`);
+
+    // Generate ASS subtitle file (CapCut style)
+    const assPath = path.join(TEMP_DIR, `subs_${chatId}.ass`);
+    let assContent = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,60,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
+
+    for (const chunk of chunks) {
+      const startTime = formatASSTime(chunk.timestamp[0]);
+      const endTime = formatASSTime(chunk.timestamp[1]);
+      const text = chunk.text.replace(/\n/g, "\\N");
+      assContent += `Dialogue: 0,${startTime},${endTime},Default,,0,0,0,,${text}\n`;
+    }
+    fs.writeFileSync(assPath, assContent);
+
+    const outPath = path.join(TEMP_DIR, `captioned_${chatId}.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-vf", `ass=${assPath}`, "-c:a", "copy", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: `🎤 Auto-captioned (${chunks.length} segments)` });
+    [outPath, assPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    await updateProgress(chatId, statusMsg.message_id, `✅ Captions added! ${chunks.length} segments burned onto video.`);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /music - Add background music
+bot.onText(/^\/music(?:\s+([\d.]+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!session.audioPath) return bot.sendMessage(chatId, "🎵 Send an audio file first, then use /music to overlay it.\n\nOptional: /music 0.3 (set music volume, default 0.3)");
+  const musicVol = parseFloat(match[1]) || 0.3;
+  try {
+    bot.sendMessage(chatId, `🎵 Adding background music (volume: ${musicVol})...`);
+    const outPath = path.join(TEMP_DIR, `music_out_${chatId}.mp4`);
+    const duration = await getVideoDuration(session.videoPath);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).input(session.audioPath).output(outPath)
+        .outputOptions([
+          "-filter_complex", `[1:a]volume=${musicVol},aloop=loop=-1:size=2e+09[music];[0:a][music]amix=inputs=2:duration=first:dropout_transition=2[aout]`,
+          "-map", "0:v", "-map", "[aout]",
+          "-c:v", "copy", "-shortest", "-preset", "ultrafast"
+        ])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🎵 Background music added (vol: ${musicVol})` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /voice - Voice effects
+bot.onText(/^\/voice(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId,
+    "🎭 *Voice Effects*\n\n" +
+    "/voice deep - Deep/bass voice\n" +
+    "/voice high - High pitched\n" +
+    "/voice echo - Echo effect\n" +
+    "/voice reverb - Reverb/hall\n" +
+    "/voice robot - Robotic voice\n" +
+    "/voice whisper - Whisper effect\n" +
+    "/voice telephone - Phone call effect",
+    { parse_mode: "Markdown" }
+  );
+
+  const effects = {
+    deep: "asetrate=44100*0.75,aresample=44100,atempo=1.333",
+    high: "asetrate=44100*1.5,aresample=44100,atempo=0.666",
+    echo: "aecho=0.8:0.88:60:0.4",
+    reverb: "aecho=0.8:0.9:1000:0.3",
+    robot: "afftfilt=real='hypot(re,im)*sin(0)':imag='hypot(re,im)*cos(0)':win_size=512:overlap=0.75",
+    whisper: "highpass=f=1000,lowpass=f=3000,volume=2",
+    telephone: "highpass=f=300,lowpass=f=3400,volume=1.5",
+  };
+
+  const effect = match[1].toLowerCase();
+  if (!effects[effect]) return bot.sendMessage(chatId, "Unknown effect. Use /voice to see options.");
+
+  try {
+    bot.sendMessage(chatId, `🎭 Applying ${effect} voice effect...`);
+    const outPath = path.join(TEMP_DIR, `voice_${chatId}.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-af", effects[effect], "-c:v", "copy", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🎭 Voice: ${effect}` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /colorgrade - Cinematic color grading
+bot.onText(/^\/colorgrade(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId,
+    "🎨 *Color Grading*\n\n" +
+    "/colorgrade cinematic - Teal & orange film look\n" +
+    "/colorgrade warm - Warm golden tones\n" +
+    "/colorgrade cool - Cool blue tones\n" +
+    "/colorgrade vintage - Retro faded look\n" +
+    "/colorgrade dramatic - High contrast moody\n" +
+    "/colorgrade pastel - Soft pastel colors\n" +
+    "/colorgrade noir - Dark film noir",
+    { parse_mode: "Markdown" }
+  );
+
+  const grades = {
+    cinematic: "curves=r='0/0 0.25/0.2 0.5/0.5 0.75/0.8 1/1':g='0/0 0.25/0.22 0.5/0.47 0.75/0.77 1/0.95':b='0/0.05 0.25/0.3 0.5/0.52 0.75/0.72 1/0.9',eq=saturation=1.2:contrast=1.1",
+    warm: "colortemperature=temperature=6500,eq=saturation=1.15:brightness=0.05",
+    cool: "colortemperature=temperature=3500,eq=saturation=0.9:contrast=1.1",
+    vintage: "curves=vintage,eq=saturation=0.8:brightness=0.05:contrast=0.95",
+    dramatic: "eq=contrast=1.5:brightness=-0.05:saturation=1.3",
+    pastel: "eq=saturation=0.7:brightness=0.1:contrast=0.9",
+    noir: "colorchannelmixer=.3:.4:.3:0:.3:.4:.3:0:.3:.4:.3,eq=contrast=1.4:brightness=-0.05",
+  };
+
+  const grade = match[1].toLowerCase();
+  if (!grades[grade]) return bot.sendMessage(chatId, "Unknown grade. Use /colorgrade to see options.");
+
+  try {
+    bot.sendMessage(chatId, `🎨 Applying ${grade} color grade...`);
+    const outPath = path.join(TEMP_DIR, `grade_${chatId}.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-vf", grades[grade], "-c:a", "copy", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🎨 Color grade: ${grade}` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /speedramp - Speed ramp effect
+bot.onText(/^\/speedramp$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  try {
+    bot.sendMessage(chatId, "⏩ Creating speed ramp (slow → fast → slow)...");
+    const outPath = path.join(TEMP_DIR, `ramp_${chatId}.mp4`);
+    const duration = await getVideoDuration(session.videoPath);
+    // Split into 3 parts: slow(0.5x), fast(2x), slow(0.5x)
+    const third = duration / 3;
+    const p1 = path.join(TEMP_DIR, `ramp1_${chatId}.mp4`);
+    const p2 = path.join(TEMP_DIR, `ramp2_${chatId}.mp4`);
+    const p3 = path.join(TEMP_DIR, `ramp3_${chatId}.mp4`);
+
+    // Part 1: Slow
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(p1)
+        .outputOptions(["-t", String(third), "-vf", "setpts=2*PTS", "-af", "atempo=0.5", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    // Part 2: Fast
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(p2)
+        .outputOptions(["-ss", String(third), "-t", String(third), "-vf", "setpts=0.5*PTS", "-af", "atempo=2", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    // Part 3: Slow
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(p3)
+        .outputOptions(["-ss", String(third * 2), "-vf", "setpts=2*PTS", "-af", "atempo=0.5", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+
+    // Concat
+    const listPath = path.join(TEMP_DIR, `ramp_list_${chatId}.txt`);
+    fs.writeFileSync(listPath, `file '${p1}'\nfile '${p2}'\nfile '${p3}'`);
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(listPath).inputOptions(["-f", "concat", "-safe", "0"]).output(outPath)
+        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+
+    await bot.sendVideo(chatId, outPath, { caption: "⏩ Speed ramp: slow → fast → slow" });
+    [p1, p2, p3, listPath, outPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /pip - Picture-in-picture
+bot.onText(/^\/pip(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!session.secondVideoPath) return bot.sendMessage(chatId, "📌 Send a second video first, then use /pip.\n\nThe second video will be overlaid as a small box.\n\nPositions: /pip topright /pip topleft /pip bottomright /pip bottomleft");
+  const position = (match[1] || "bottomright").toLowerCase();
+  const positions = {
+    topright: "main_w-overlay_w-10:10",
+    topleft: "10:10",
+    bottomright: "main_w-overlay_w-10:main_h-overlay_h-10",
+    bottomleft: "10:main_h-overlay_h-10",
+  };
+  const pos = positions[position] || positions.bottomright;
+  try {
+    bot.sendMessage(chatId, `📌 Creating picture-in-picture (${position})...`);
+    const outPath = path.join(TEMP_DIR, `pip_${chatId}.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).input(session.secondVideoPath).output(outPath)
+        .outputOptions([
+          "-filter_complex", `[1:v]scale=iw/4:ih/4[pip];[0:v][pip]overlay=${pos}[out]`,
+          "-map", "[out]", "-map", "0:a?",
+          "-c:v", "libx264", "-preset", "ultrafast", "-shortest"
+        ])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `📌 Picture-in-picture (${position})` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /split - Split screen
+bot.onText(/^\/split(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!session.secondVideoPath) return bot.sendMessage(chatId, "🎭 Send a second video first, then use /split.\n\nOptions: /split horizontal /split vertical");
+  const layout = (match[1] || "horizontal").toLowerCase();
+  try {
+    bot.sendMessage(chatId, `🎭 Creating ${layout} split screen...`);
+    const outPath = path.join(TEMP_DIR, `split_${chatId}.mp4`);
+    const filter = layout === "vertical"
+      ? "[0:v]scale=1920:540[top];[1:v]scale=1920:540[bot];[top][bot]vstack[out]"
+      : "[0:v]scale=960:1080[left];[1:v]scale=960:1080[right];[left][right]hstack[out]";
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).input(session.secondVideoPath).output(outPath)
+        .outputOptions(["-filter_complex", filter, "-map", "[out]", "-map", "0:a?", "-preset", "ultrafast", "-shortest"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🎭 Split screen (${layout})` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /bgremove - Green screen removal
+bot.onText(/^\/bgremove(?:\s+(\S+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  const color = (match[1] || "green").toLowerCase();
+  const colors = { green: "0x00FF00", blue: "0x0000FF", white: "0xFFFFFF", red: "0xFF0000" };
+  if (!colors[color]) return bot.sendMessage(chatId, "Usage: /bgremove green\n\nColors: green, blue, white, red");
+  try {
+    bot.sendMessage(chatId, `🟢 Removing ${color} background...`);
+    const outPath = path.join(TEMP_DIR, `bgremove_${chatId}.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-vf", `chromakey=${colors[color]}:0.15:0.15`, "-c:a", "copy", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🟢 ${color} background removed` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /loop - Loop video N times
+bot.onText(/^\/loop(?:\s+(\d+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  if (!match[1]) return bot.sendMessage(chatId, "Usage: /loop 3\n\nLoops the video N times (max 10).");
+  const loops = Math.min(parseInt(match[1]), 10);
+  try {
+    bot.sendMessage(chatId, `🔁 Looping video ${loops} times...`);
+    const outPath = path.join(TEMP_DIR, `loop_${chatId}.mp4`);
+    const listPath = path.join(TEMP_DIR, `loop_list_${chatId}.txt`);
+    const entries = Array(loops).fill(`file '${session.videoPath}'`).join("\n");
+    fs.writeFileSync(listPath, entries);
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(listPath).inputOptions(["-f", "concat", "-safe", "0"]).output(outPath)
+        .outputOptions(["-c", "copy"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendVideo(chatId, outPath, { caption: `🔁 Looped ${loops}x` });
+    [outPath, listPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /thumbnail - Extract thumbnail
+bot.onText(/^\/thumbnail(?:\s+([\d:.]+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  const time = match[1] ? parseTime(match[1]) || 5 : 5;
+  try {
+    bot.sendMessage(chatId, `🖼️ Extracting thumbnail at ${formatTime(time)}...`);
+    const outPath = path.join(TEMP_DIR, `thumb_${chatId}.jpg`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions(["-ss", String(time), "-frames:v", "1", "-q:v", "2"])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await bot.sendPhoto(chatId, outPath, { caption: `🖼️ Thumbnail at ${formatTime(time)}` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// Helper: Format ASS subtitle timestamp
+function formatASSTime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const cs = Math.floor((seconds % 1) * 100);
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
+}
 
 // =============================================
 // --- Core Functions ---
