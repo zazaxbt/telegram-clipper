@@ -76,6 +76,7 @@ initGramClient().catch((err) => console.error("GramJS init failed:", err.message
 
 // Track user sessions
 const sessions = {};
+let processingLock = false;
 
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
@@ -241,6 +242,11 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
   }
   if (match[1]) session.clipDuration = parseInt(match[1]);
 
+  if (processingLock) {
+    return bot.sendMessage(chatId, "⏳ Another video is being processed. Please wait...");
+  }
+  processingLock = true;
+
   try {
     const duration = await getVideoDuration(session.videoPath);
     const durationStr = formatTime(duration);
@@ -328,6 +334,10 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
       fs.unlinkSync(outPath);
     }
 
+    // Clean up source video to free disk space
+    try { fs.unlinkSync(session.videoPath); } catch {}
+    delete sessions[chatId];
+
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(0);
     await updateProgress(chatId, mid,
       `🎉 All done!\n\n` +
@@ -341,6 +351,8 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
     );
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  } finally {
+    processingLock = false;
   }
 });
 
@@ -353,6 +365,11 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
   }
 
   const clipDuration = match[1] ? parseInt(match[1]) : session.clipDuration;
+
+  if (processingLock) {
+    return bot.sendMessage(chatId, "⏳ Another video is being processed. Please wait...");
+  }
+  processingLock = true;
 
   try {
     const videoDuration = await getVideoDuration(session.videoPath);
@@ -394,9 +411,15 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
       fs.unlinkSync(outPath);
     }
 
+    // Clean up source video to free disk space
+    try { fs.unlinkSync(session.videoPath); } catch {}
+    delete sessions[chatId];
+
     bot.sendMessage(chatId, "✅ All Q&A clips sent!");
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  } finally {
+    processingLock = false;
   }
 });
 
@@ -423,6 +446,10 @@ bot.onText(/\/cut\s+(\S+)\s+(\S+)/, async (msg, match) => {
       caption: `🎬 Clip (${formatTime(start)} → ${formatTime(end)})`,
     });
     fs.unlinkSync(outPath);
+
+    // Clean up source video to free disk space
+    try { fs.unlinkSync(session.videoPath); } catch {}
+    delete sessions[chatId];
   } catch (err) {
     bot.sendMessage(chatId, `❌ Error: ${err.message}`);
   }
@@ -657,33 +684,38 @@ function getVideoDuration(filePath) {
 function detectScenes(filePath) {
   return new Promise((resolve, reject) => {
     const scenes = [];
-    // Speed up: only analyze 1 frame per second instead of every frame
-    const args = [
+    const { spawn } = require("child_process");
+    const proc = spawn("ffmpeg", [
       "-i", filePath,
-      "-vf", "fps=1,select='gt(scene,0.3)',showinfo",
+      "-vf", "fps=0.5,select='gt(scene,0.3)',showinfo",
       "-vsync", "vfr",
       "-f", "null",
       "-"
-    ];
+    ], { stdio: ["pipe", "pipe", "pipe"] });
 
-    const { spawn } = require("child_process");
-    const proc = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
-    let stderr = "";
-
-    // Timeout after 2 minutes
     const timeout = setTimeout(() => {
       proc.kill();
-      resolve(scenes); // Return whatever we found so far
-    }, 2 * 60 * 1000);
+      resolve(scenes);
+    }, 3 * 60 * 1000);
 
-    proc.stderr.on("data", (data) => { stderr += data.toString(); });
+    // Process line by line instead of buffering all stderr
+    let partial = "";
+    proc.stderr.on("data", (data) => {
+      partial += data.toString();
+      const lines = partial.split("\n");
+      partial = lines.pop(); // keep incomplete line
+      for (const line of lines) {
+        const match = line.match(/pts_time:(\d+\.?\d*)/);
+        if (match) scenes.push(parseFloat(match[1]));
+      }
+    });
 
     proc.on("close", () => {
       clearTimeout(timeout);
-      const regex = /pts_time:(\d+\.?\d*)/g;
-      let match;
-      while ((match = regex.exec(stderr)) !== null) {
-        scenes.push(parseFloat(match[1]));
+      // Process remaining
+      if (partial) {
+        const match = partial.match(/pts_time:(\d+\.?\d*)/);
+        if (match) scenes.push(parseFloat(match[1]));
       }
       resolve(scenes);
     });
@@ -698,36 +730,31 @@ function detectScenes(filePath) {
 function detectAudioPeaks(filePath) {
   return new Promise((resolve, reject) => {
     const { spawn } = require("child_process");
-    const args = [
+    const peaks = [];
+    // Downsample to 8kHz mono for speed and memory
+    const proc = spawn("ffmpeg", [
       "-i", filePath,
-      "-af", "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+      "-af", "aresample=8000,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+      "-ac", "1",
       "-f", "null",
       "-"
-    ];
+    ], { stdio: ["pipe", "pipe", "pipe"] });
 
-    const proc = spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-
-    // Timeout after 2 minutes
     const timeout = setTimeout(() => {
       proc.kill();
-      resolve([]);
-    }, 2 * 60 * 1000);
+      peaks.sort((a, b) => b.level - a.level);
+      resolve(peaks);
+    }, 3 * 60 * 1000);
 
-    proc.stdout.on("data", (data) => { stdout += data.toString(); });
-    proc.stderr.on("data", (data) => { stderr += data.toString(); });
-
-    proc.on("close", () => {
-      clearTimeout(timeout);
-      const peaks = [];
-      const lines = stdout.split("\n");
-      let frameTime = 0;
-
+    let frameTime = 0;
+    let partial = "";
+    proc.stdout.on("data", (data) => {
+      partial += data.toString();
+      const lines = partial.split("\n");
+      partial = lines.pop();
       for (const line of lines) {
         const timeMatch = line.match(/pts_time:(\d+\.?\d*)/);
         if (timeMatch) frameTime = parseFloat(timeMatch[1]);
-
         const rmsMatch = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?\d+\.?\d*)/);
         if (rmsMatch) {
           const rms = parseFloat(rmsMatch[1]);
@@ -736,7 +763,10 @@ function detectAudioPeaks(filePath) {
           }
         }
       }
+    });
 
+    proc.on("close", () => {
+      clearTimeout(timeout);
       peaks.sort((a, b) => b.level - a.level);
       resolve(peaks);
     });
