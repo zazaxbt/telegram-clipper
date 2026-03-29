@@ -113,6 +113,177 @@ initGramClient().catch((err) => console.error("GramJS init failed:", err.message
 
 // Whisper transcription via Python (lightweight, runs on demand)
 
+// =============================================
+// --- ADMIN & ACCESS CONTROL ---
+// =============================================
+
+const ADMIN_ID = parseInt(process.env.ADMIN_TELEGRAM_ID) || 0;
+const ACCESS_CODE = process.env.BOT_ACCESS_CODE || "clipper2024";
+const IS_PRIVATE = process.env.BOT_PRIVATE === "true";
+
+// Simple JSON file-based storage for users and stats
+const DB_PATH = path.join(__dirname, "db.json");
+function loadDB() {
+  try {
+    if (fs.existsSync(DB_PATH)) return JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
+  } catch {}
+  return { users: {}, stats: { totalClips: 0, totalEdits: 0, totalVideos: 0 } };
+}
+function saveDB(db) {
+  try { fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2)); } catch {}
+}
+
+let db = loadDB();
+
+function trackUser(msg) {
+  const chatId = msg.chat.id;
+  const user = msg.from || {};
+  if (!db.users[chatId]) {
+    db.users[chatId] = {
+      id: chatId,
+      username: user.username || "",
+      firstName: user.first_name || "",
+      lastName: user.last_name || "",
+      joinedAt: new Date().toISOString(),
+      authorized: !IS_PRIVATE, // auto-authorize if bot is public
+      clipCount: 0,
+      editCount: 0,
+      lastActive: new Date().toISOString(),
+    };
+  } else {
+    db.users[chatId].lastActive = new Date().toISOString();
+    db.users[chatId].username = user.username || db.users[chatId].username;
+  }
+  saveDB(db);
+  return db.users[chatId];
+}
+
+function isAuthorized(chatId) {
+  if (!IS_PRIVATE) return true;
+  if (chatId === ADMIN_ID) return true;
+  return db.users[chatId] && db.users[chatId].authorized;
+}
+
+function trackStat(chatId, type) {
+  if (type === "clip") { db.stats.totalClips++; if (db.users[chatId]) db.users[chatId].clipCount++; }
+  if (type === "edit") { db.stats.totalEdits++; if (db.users[chatId]) db.users[chatId].editCount++; }
+  if (type === "video") db.stats.totalVideos++;
+  saveDB(db);
+}
+
+// /access CODE - Authorize with access code
+bot.onText(/^\/access(?:\s+(.+))?$/, (msg, match) => {
+  const chatId = msg.chat.id;
+  trackUser(msg);
+  if (!IS_PRIVATE) return bot.sendMessage(chatId, "🔓 Bot is public — no access code needed!");
+  if (!match[1]) return bot.sendMessage(chatId, "🔒 This bot is private.\n\nUsage: /access YOUR_CODE");
+  if (match[1].trim() === ACCESS_CODE) {
+    db.users[chatId].authorized = true;
+    saveDB(db);
+    bot.sendMessage(chatId, "✅ Access granted! You can now use all features.");
+  } else {
+    bot.sendMessage(chatId, "❌ Invalid access code.");
+  }
+});
+
+// /admin - Admin dashboard
+bot.onText(/^\/admin$/, (msg) => {
+  const chatId = msg.chat.id;
+  if (chatId !== ADMIN_ID) return bot.sendMessage(chatId, "❌ Admin only.");
+
+  const users = Object.values(db.users);
+  const authorized = users.filter(u => u.authorized);
+  const activeToday = users.filter(u => {
+    const last = new Date(u.lastActive);
+    const now = new Date();
+    return (now - last) < 24 * 60 * 60 * 1000;
+  });
+
+  const topUsers = [...users].sort((a, b) => (b.clipCount + b.editCount) - (a.clipCount + a.editCount)).slice(0, 10);
+
+  bot.sendMessage(chatId,
+    `📊 *Admin Dashboard*\n\n` +
+    `👥 *Users:*\n` +
+    `• Total: ${users.length}\n` +
+    `• Authorized: ${authorized.length}\n` +
+    `• Active today: ${activeToday.length}\n\n` +
+    `📈 *Stats:*\n` +
+    `• Total videos: ${db.stats.totalVideos}\n` +
+    `• Total clips: ${db.stats.totalClips}\n` +
+    `• Total edits: ${db.stats.totalEdits}\n\n` +
+    `🏆 *Top Users:*\n` +
+    topUsers.map((u, i) =>
+      `${i + 1}. @${u.username || u.firstName || u.id} — ${u.clipCount} clips, ${u.editCount} edits`
+    ).join('\n') +
+    `\n\n🔒 Bot is ${IS_PRIVATE ? 'PRIVATE' : 'PUBLIC'}\n` +
+    `🔑 Access code: \`${ACCESS_CODE}\`\n\n` +
+    `*Admin Commands:*\n` +
+    `/admin - This dashboard\n` +
+    `/users - List all users\n` +
+    `/broadcast MESSAGE - Send to all users\n` +
+    `/grant USER_ID - Grant access\n` +
+    `/revoke USER_ID - Revoke access`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+// /users - List all users (admin only)
+bot.onText(/^\/users$/, (msg) => {
+  const chatId = msg.chat.id;
+  if (chatId !== ADMIN_ID) return;
+  const users = Object.values(db.users);
+  if (users.length === 0) return bot.sendMessage(chatId, "No users yet.");
+  const list = users.map(u =>
+    `${u.authorized ? '✅' : '❌'} ${u.username ? '@' + u.username : u.firstName || u.id} (${u.id}) — ${u.clipCount}c/${u.editCount}e — last: ${new Date(u.lastActive).toLocaleDateString()}`
+  ).join('\n');
+  bot.sendMessage(chatId, `👥 *Users (${users.length}):*\n\n${list}`, { parse_mode: "Markdown" });
+});
+
+// /broadcast MESSAGE - Send to all users (admin only)
+bot.onText(/^\/broadcast\s+(.+)$/s, async (msg, match) => {
+  const chatId = msg.chat.id;
+  if (chatId !== ADMIN_ID) return;
+  const message = match[1];
+  const users = Object.values(db.users);
+  let sent = 0, failed = 0;
+  for (const user of users) {
+    try {
+      await bot.sendMessage(user.id, `📢 *Announcement:*\n\n${message}`, { parse_mode: "Markdown" });
+      sent++;
+    } catch { failed++; }
+  }
+  bot.sendMessage(chatId, `📢 Broadcast: ${sent} sent, ${failed} failed.`);
+});
+
+// /grant USER_ID - Grant access (admin only)
+bot.onText(/^\/grant\s+(\d+)$/, (msg, match) => {
+  const chatId = msg.chat.id;
+  if (chatId !== ADMIN_ID) return;
+  const userId = match[1];
+  if (db.users[userId]) {
+    db.users[userId].authorized = true;
+    saveDB(db);
+    bot.sendMessage(chatId, `✅ Access granted to ${userId}`);
+    bot.sendMessage(userId, "✅ You've been granted access to the bot!").catch(() => {});
+  } else {
+    bot.sendMessage(chatId, `❌ User ${userId} not found. They need to /start the bot first.`);
+  }
+});
+
+// /revoke USER_ID - Revoke access (admin only)
+bot.onText(/^\/revoke\s+(\d+)$/, (msg, match) => {
+  const chatId = msg.chat.id;
+  if (chatId !== ADMIN_ID) return;
+  const userId = match[1];
+  if (db.users[userId]) {
+    db.users[userId].authorized = false;
+    saveDB(db);
+    bot.sendMessage(chatId, `🚫 Access revoked for ${userId}`);
+  } else {
+    bot.sendMessage(chatId, `❌ User ${userId} not found.`);
+  }
+});
+
 // Track user sessions
 const sessions = {};
 let processingLock = false;
@@ -161,6 +332,13 @@ bot.onText(/\/status/, (msg) => {
 });
 
 bot.onText(/\/start/, (msg) => {
+  trackUser(msg);
+  if (!isAuthorized(msg.chat.id)) {
+    return bot.sendMessage(msg.chat.id,
+      `🔒 *This bot is private.*\n\nYou need an access code to use it.\n\nSend: /access YOUR_CODE`,
+      { parse_mode: "Markdown" }
+    );
+  }
   bot.sendMessage(
     msg.chat.id,
     `🎬 *Telegram Clipper Bot*\n\n` +
@@ -191,6 +369,9 @@ const COMMANDS_TEXT = "📋 Commands:\n/clip - Auto-detect best moments\n/clip 6
 // Handle video uploads
 bot.on("video", async (msg) => {
   const chatId = msg.chat.id;
+  trackUser(msg);
+  if (!isAuthorized(chatId)) return bot.sendMessage(chatId, "🔒 Use /access CODE to unlock the bot.");
+  trackStat(chatId, "video");
   const fileId = msg.video.file_id;
   const fileSize = msg.video.file_size || 0;
   const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
@@ -1935,11 +2116,60 @@ function formatTime(seconds) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// Health endpoint for Render free tier
+// Health endpoint + Admin Web Dashboard
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("Telegram Clipper Bot is running");
+  if (req.url === "/admin" || req.url === "/dashboard") {
+    const users = Object.values(db.users);
+    const authorized = users.filter(u => u.authorized);
+    const activeToday = users.filter(u => (Date.now() - new Date(u.lastActive)) < 86400000);
+    const html = `<!DOCTYPE html><html><head><title>Clipper Bot Dashboard</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0f0f0f;color:#fff;padding:20px}
+.card{background:#1a1a2e;border-radius:12px;padding:20px;margin:10px 0}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.stat{background:#16213e;border-radius:8px;padding:15px;text-align:center}
+.stat .num{font-size:2em;font-weight:bold;color:#00d2ff}
+.stat .label{color:#888;font-size:0.85em;margin-top:5px}
+h1{color:#00d2ff;margin-bottom:15px}
+h2{color:#e94560;margin:15px 0 10px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #222}
+th{color:#00d2ff}
+.badge{padding:2px 8px;border-radius:4px;font-size:0.8em}
+.badge.yes{background:#0f5132;color:#75b798}
+.badge.no{background:#58151c;color:#ea868f}
+</style></head><body>
+<h1>🎬 Clipper Bot Dashboard</h1>
+<div class="stats">
+  <div class="stat"><div class="num">${users.length}</div><div class="label">Total Users</div></div>
+  <div class="stat"><div class="num">${authorized.length}</div><div class="label">Authorized</div></div>
+  <div class="stat"><div class="num">${activeToday.length}</div><div class="label">Active Today</div></div>
+  <div class="stat"><div class="num">${db.stats.totalVideos}</div><div class="label">Videos</div></div>
+  <div class="stat"><div class="num">${db.stats.totalClips}</div><div class="label">Clips Made</div></div>
+  <div class="stat"><div class="num">${db.stats.totalEdits}</div><div class="label">Edits Made</div></div>
+</div>
+<div class="card"><h2>👥 Users</h2>
+<table><tr><th>User</th><th>ID</th><th>Access</th><th>Clips</th><th>Edits</th><th>Last Active</th></tr>
+${users.map(u => `<tr>
+  <td>@${u.username || u.firstName || 'unknown'}</td>
+  <td>${u.id}</td>
+  <td><span class="badge ${u.authorized ? 'yes' : 'no'}">${u.authorized ? 'Yes' : 'No'}</span></td>
+  <td>${u.clipCount}</td>
+  <td>${u.editCount}</td>
+  <td>${new Date(u.lastActive).toLocaleDateString()}</td>
+</tr>`).join('')}
+</table></div>
+<div class="card"><p style="color:#888">🔒 Bot is ${IS_PRIVATE ? 'PRIVATE' : 'PUBLIC'} | Auto-refreshes on page load</p></div>
+</body></html>`;
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(html);
+  } else {
+    res.writeHead(200);
+    res.end("Telegram Clipper Bot is running");
+  }
 });
 server.listen(PORT, () => {
   console.log(`🎬 Telegram Clipper Bot is running! (health check on port ${PORT})`);
