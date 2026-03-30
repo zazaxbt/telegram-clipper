@@ -8,7 +8,6 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
-const youtubedl = require("youtube-dl-exec");
 const { spawn } = require("child_process");
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
