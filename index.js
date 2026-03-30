@@ -114,67 +114,83 @@ initGramClient().catch((err) => console.error("GramJS init failed:", err.message
 // Smart video sender: tries Bot API first, falls back to GramJS for large files
 async function sendVideoSmart(chatId, filePath, options = {}) {
   const fileSize = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
-  const MAX_BOT_API = 49 * 1024 * 1024; // ~49MB safe limit
+  const MAX_BOT_API = 45 * 1024 * 1024; // ~45MB safe limit
+  const sizeMB = (fileSize / 1024 / 1024).toFixed(1);
 
-  // If file is small enough, use Bot API directly
+  // Step 1: Try Bot API if file looks small enough
   if (fileSize < MAX_BOT_API) {
-    return bot.sendVideo(chatId, filePath, options);
-  }
-
-  // File too large — use GramJS
-  if (!gramClient) {
-    // Try to compress first
-    const compressedPath = filePath.replace(/\.mp4$/, '_compressed.mp4');
-    await new Promise((resolve, reject) => {
-      ffmpeg(filePath).output(compressedPath)
-        .outputOptions(['-c:v', 'libx264', '-crf', '32', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart'])
-        .on('end', resolve).on('error', reject).run();
-    });
-
-    const compSize = fs.existsSync(compressedPath) ? fs.statSync(compressedPath).size : 0;
-    if (compSize > 0 && compSize < MAX_BOT_API) {
-      const result = await bot.sendVideo(chatId, compressedPath, options);
-      try { fs.unlinkSync(compressedPath); } catch {}
-      return result;
+    try {
+      return await bot.sendVideo(chatId, filePath, options);
+    } catch (err) {
+      const is413 = err.message && (err.message.includes("413") || err.message.includes("too large") || err.message.includes("Too Large"));
+      if (!is413) throw err;
+      console.log(`⚠️ Bot API rejected ${sizeMB}MB file, falling back...`);
+      // Fall through to GramJS / compress
     }
-    try { fs.unlinkSync(compressedPath); } catch {}
-
-    throw new Error("File too large (>50MB). GramJS not available — set TELEGRAM_API_ID and TELEGRAM_API_HASH to enable large uploads.");
   }
 
-  // Upload via GramJS
-  console.log(`📤 Uploading ${(fileSize / 1024 / 1024).toFixed(1)}MB via GramJS...`);
+  // Step 2: Try GramJS upload (supports up to 2GB)
+  if (gramClient) {
+    console.log(`📤 Uploading ${sizeMB}MB via GramJS...`);
+    try {
+      const peer = await gramClient.getInputEntity(chatId);
+      await gramClient.sendFile(peer, {
+        file: filePath,
+        caption: options.caption || "",
+        forceDocument: false,
+        workers: 4,
+      });
+      return true;
+    } catch (gramErr) {
+      console.error("GramJS upload failed:", gramErr.message);
+      // Fall through to compress
+    }
+  }
+
+  // Step 3: Compress and try Bot API
+  console.log(`📦 Compressing ${sizeMB}MB for Bot API upload...`);
+  const compressedPath = filePath.replace(/\.mp4$/, '_compressed.mp4');
   try {
-    await gramClient.sendFile(chatId, {
-      file: filePath,
-      caption: options.caption || "",
-      forceDocument: false,
-      workers: 4,
-      progressCallback: (progress) => {
-        console.log(`📤 Upload progress: ${(progress * 100).toFixed(0)}%`);
-      },
-    });
-    return true;
-  } catch (gramErr) {
-    console.error("GramJS upload error:", gramErr.message);
-    // If GramJS also fails, try to compress and send via Bot API
-    const compressedPath = filePath.replace(/\.mp4$/, '_compressed.mp4');
     await new Promise((resolve, reject) => {
       ffmpeg(filePath).output(compressedPath)
-        .outputOptions(['-c:v', 'libx264', '-crf', '35', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '64k', '-vf', 'scale=720:-2', '-movflags', '+faststart'])
+        .outputOptions(['-c:v', 'libx264', '-crf', '30', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart'])
         .on('end', resolve).on('error', reject).run();
     });
 
-    const compSize = fs.existsSync(compressedPath) ? fs.statSync(compressedPath).size : 0;
-    if (compSize > 0 && compSize < MAX_BOT_API) {
-      await bot.sendMessage(chatId, "⚠️ File was too large — sending compressed version.");
+    let compSize = fs.existsSync(compressedPath) ? fs.statSync(compressedPath).size : 0;
+
+    // If still too big, compress harder with scale down
+    if (compSize >= MAX_BOT_API) {
+      const hardPath = filePath.replace(/\.mp4$/, '_hard_compressed.mp4');
+      await new Promise((resolve, reject) => {
+        ffmpeg(filePath).output(hardPath)
+          .outputOptions(['-c:v', 'libx264', '-crf', '35', '-preset', 'veryfast', '-c:a', 'aac', '-b:a', '64k', '-vf', 'scale=720:-2', '-movflags', '+faststart'])
+          .on('end', resolve).on('error', reject).run();
+      });
+      try { fs.unlinkSync(compressedPath); } catch {}
+      const hardSize = fs.existsSync(hardPath) ? fs.statSync(hardPath).size : 0;
+      if (hardSize > 0 && hardSize < MAX_BOT_API) {
+        await bot.sendMessage(chatId, `⚠️ Original clip was ${sizeMB}MB — sending compressed (720p) version.`);
+        const result = await bot.sendVideo(chatId, hardPath, options);
+        try { fs.unlinkSync(hardPath); } catch {}
+        return result;
+      }
+      try { fs.unlinkSync(hardPath); } catch {}
+      throw new Error(`File too large even after compression (${sizeMB}MB). Try a shorter clip or /compress first.`);
+    }
+
+    if (compSize > 0) {
+      await bot.sendMessage(chatId, `⚠️ Original clip was ${sizeMB}MB — sending compressed version.`);
       const result = await bot.sendVideo(chatId, compressedPath, options);
       try { fs.unlinkSync(compressedPath); } catch {}
       return result;
     }
-    try { fs.unlinkSync(compressedPath); } catch {}
-    throw new Error(`File too large to send (${(fileSize / 1024 / 1024).toFixed(1)}MB). Try /compress first to reduce size.`);
+  } catch (compErr) {
+    console.error("Compression failed:", compErr.message);
   }
+  try { fs.unlinkSync(compressedPath); } catch {}
+
+  throw new Error(`File too large to send (${sizeMB}MB). Try /compress first to reduce file size.`);
 }
 
 // Whisper transcription via Python (lightweight, runs on demand)
