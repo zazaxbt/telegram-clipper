@@ -874,20 +874,25 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
       return bot.sendMessage(chatId, `❌ No questions detected in the transcript.\n\n📝 Full transcript:\n${debugMsg}\n\n💡 Tip: The AI transcription may not have captured the questions clearly. Try /clip for auto-highlights instead.`);
     }
 
-    bot.sendMessage(chatId, `❓ Found ${qaClips.length} Q&A moment(s). Cutting clips...`);
+    // Limit to user's clip count setting
+    const maxClips = session.clipCount || 3;
+    const clipsToSend = qaClips.slice(0, maxClips);
+    bot.sendMessage(chatId, `❓ Found ${qaClips.length} Q&A moment(s). Sending top ${clipsToSend.length} clips...`);
 
-    for (let i = 0; i < qaClips.length; i++) {
-      const { question, start, end } = qaClips[i];
+    for (let i = 0; i < clipsToSend.length; i++) {
+      const { question, start, end } = clipsToSend[i];
       const outPath = path.join(TEMP_DIR, `qa_${chatId}_${i}.mp4`);
 
+      bot.sendMessage(chatId, `✂️ Clip ${i + 1}/${clipsToSend.length}: Cutting ${formatTime(start)} → ${formatTime(end)}...`);
       await cutVideo(session.videoPath, start, end, outPath);
 
-      const caption = `❓ ${question}\n\n🎬 Clip ${i + 1}/${qaClips.length} (${formatTime(start)} → ${formatTime(end)})`;
+      bot.sendMessage(chatId, `📤 Clip ${i + 1}/${clipsToSend.length}: Sending...`);
+      const caption = `❓ ${question}\n\n🎬 Clip ${i + 1}/${clipsToSend.length} (${formatTime(start)} → ${formatTime(end)})`;
       await sendVideoSmart(chatId, outPath, {
-        caption: caption.slice(0, 1024), // Telegram caption limit
+        caption: caption.slice(0, 1024),
       });
 
-      fs.unlinkSync(outPath);
+      try { fs.unlinkSync(outPath); } catch {}
     }
 
     // Clean up source video to free disk space
