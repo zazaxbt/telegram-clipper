@@ -420,6 +420,59 @@ bot.onText(/\/stop/, (msg) => {
 });
 
 // /status - Show current session info
+// Debug: test YouTube download methods
+bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
+  if (isBlocked(msg)) return;
+  const chatId = msg.chat.id;
+  if (String(chatId) !== ADMIN_ID) return bot.sendMessage(chatId, "Admin only.");
+
+  const testUrl = match[1] || "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const ytId = extractYouTubeId(testUrl);
+
+  let report = `🔍 Debug: ${testUrl}\nYT ID: ${ytId || "not YouTube"}\n\n`;
+
+  // Test innertube
+  if (ytId) {
+    try {
+      report += "▶️ Testing innertube...\n";
+      const path = await downloadYouTubeDirect(ytId);
+      const size = fs.existsSync(path) ? (fs.statSync(path).size / 1024 / 1024).toFixed(1) : 0;
+      report += `✅ Innertube: ${size}MB\n`;
+      try { fs.unlinkSync(path); } catch {}
+    } catch (err) {
+      report += `❌ Innertube: ${err.message.slice(0, 150)}\n`;
+    }
+  }
+
+  // Test cobalt
+  try {
+    report += "\n▶️ Testing Cobalt...\n";
+    const path = await downloadWithCobalt(testUrl);
+    const size = fs.existsSync(path) ? (fs.statSync(path).size / 1024 / 1024).toFixed(1) : 0;
+    report += `✅ Cobalt: ${size}MB\n`;
+    try { fs.unlinkSync(path); } catch {}
+  } catch (err) {
+    report += `❌ Cobalt: ${err.message.slice(0, 150)}\n`;
+  }
+
+  // Test yt-dlp version
+  try {
+    report += "\n▶️ Checking yt-dlp...\n";
+    const ver = await new Promise((resolve, reject) => {
+      const proc = spawn("yt-dlp", ["--version"], { stdio: ["pipe", "pipe", "pipe"] });
+      let out = "";
+      proc.stdout.on("data", (d) => { out += d; });
+      proc.on("close", (code) => code === 0 ? resolve(out.trim()) : reject(new Error("not found")));
+      proc.on("error", reject);
+    });
+    report += `yt-dlp version: ${ver}\n`;
+  } catch {
+    report += "❌ yt-dlp not installed\n";
+  }
+
+  bot.sendMessage(chatId, report);
+});
+
 bot.onText(/\/status/, (msg) => {
   if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
@@ -593,19 +646,40 @@ bot.onText(socialPattern, async (msg, match) => {
   const url = match[1];
 
   try {
-    const dlMsg = await bot.sendMessage(chatId, "⬇️ Downloading video from social media...\n⏳ This may take a moment...");
+    const dlMsg = await bot.sendMessage(chatId, "⬇️ Downloading video...");
     const startTime = Date.now();
+    let filePath = null;
 
-    // Update progress every 10 seconds
-    const progressInterval = setInterval(async () => {
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    // Method 1: Direct YouTube innertube
+    const ytId = extractYouTubeId(url);
+    if (ytId) {
       try {
-        await bot.editMessageText(`⬇️ Downloading video... (${elapsed}s elapsed)`, { chat_id: chatId, message_id: dlMsg.message_id });
-      } catch {}
-    }, 10000);
+        await updateProgress(chatId, dlMsg.message_id, "⬇️ Method 1/3: YouTube direct API...");
+        filePath = await downloadYouTubeDirect(ytId);
+      } catch (err) {
+        await updateProgress(chatId, dlMsg.message_id, `⚠️ Method 1 failed: ${err.message.slice(0, 100)}\n\n⬇️ Trying Method 2...`);
+      }
+    }
 
-    const filePath = await downloadWithYtdlp(url, chatId);
-    clearInterval(progressInterval);
+    // Method 2: Cobalt API
+    if (!filePath) {
+      try {
+        await updateProgress(chatId, dlMsg.message_id, "⬇️ Method 2/3: Cobalt API...");
+        filePath = await downloadWithCobalt(url);
+      } catch (err) {
+        await updateProgress(chatId, dlMsg.message_id, `⚠️ Method 2 failed: ${err.message.slice(0, 100)}\n\n⬇️ Trying Method 3...`);
+      }
+    }
+
+    // Method 3: yt-dlp (system)
+    if (!filePath) {
+      try {
+        await updateProgress(chatId, dlMsg.message_id, "⬇️ Method 3/3: yt-dlp...");
+        filePath = await downloadWithYtdlpOnly(url, chatId);
+      } catch (err) {
+        throw new Error(`All 3 download methods failed.\n\nLast error: ${err.message.slice(0, 200)}`);
+      }
+    }
 
     const dlTime = ((Date.now() - startTime) / 1000).toFixed(1);
     const sizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
@@ -2705,45 +2779,16 @@ async function downloadWithCobalt(url) {
   throw lastErr || new Error("All Cobalt instances failed");
 }
 
-async function downloadWithYtdlp(url, chatId) {
+async function downloadWithYtdlpOnly(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
 
-  // Method 1: Direct YouTube innertube API (most reliable, no cookies)
-  const ytId = extractYouTubeId(url);
-  if (ytId) {
-    try {
-      const directPath = await downloadYouTubeDirect(ytId);
-      if (fs.existsSync(directPath)) {
-        if (directPath !== dest) fs.renameSync(directPath, dest);
-        return dest;
-      }
-    } catch (directErr) {
-      console.error("YouTube direct failed:", directErr.message);
-    }
-  }
-
-  // Method 2: Cobalt API (works for YouTube, Twitter, TikTok, etc.)
-  try {
-    const cobaltPath = await downloadWithCobalt(url);
-    if (fs.existsSync(cobaltPath)) {
-      if (cobaltPath !== dest) fs.renameSync(cobaltPath, dest);
-      return dest;
-    }
-  } catch (cobaltErr) {
-    console.error("Cobalt failed:", cobaltErr.message);
-  }
-
-  // Fallback: yt-dlp
   const args = [
     url,
-    "-o", path.join(TEMP_DIR, `${basename}.mp4`),
+    "-o", path.join(TEMP_DIR, `${basename}.%(ext)s`),
     "--no-check-certificates",
     "--no-warnings",
-    "--concurrent-fragments", "4",
-    "--extractor-args", "youtube:player_client=mweb,default",
-    "--user-agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "--recode-video", "mp4",
+    "--merge-output-format", "mp4",
   ];
 
   const cookiesPath = path.join(__dirname, "cookies.txt");
@@ -2773,7 +2818,7 @@ async function downloadWithYtdlp(url, chatId) {
     return dest;
   }
 
-  throw new Error("Download failed — both Cobalt and yt-dlp could not fetch this video");
+  throw new Error("yt-dlp download failed — no output file found");
 }
 
 function downloadFromUrl(url, chatId) {
