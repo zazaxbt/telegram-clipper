@@ -2469,7 +2469,150 @@ function extractQASegments(chunks, maxClipDuration) {
   return filtered;
 }
 
-// Download via Cobalt API (no cookies needed, supports YouTube, Twitter, etc.)
+// Extract YouTube video ID from any URL format
+function extractYouTubeId(url) {
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+    /^([a-zA-Z0-9_-]{11})$/,
+  ];
+  for (const p of patterns) {
+    const m = url.match(p);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+// Download YouTube video directly via innertube API (no cookies, no yt-dlp)
+async function downloadYouTubeDirect(videoId) {
+  const dest = path.join(TEMP_DIR, `${Date.now()}_yt_${videoId}.mp4`);
+
+  function httpsPost(urlStr, body, headers = {}) {
+    return new Promise((resolve, reject) => {
+      const urlObj = new URL(urlStr);
+      const postData = JSON.stringify(body);
+      const req = https.request({
+        hostname: urlObj.hostname,
+        path: urlObj.pathname + urlObj.search,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData), ...headers },
+        timeout: 15000,
+      }, (res) => {
+        let data = "";
+        res.on("data", (c) => { data += c; });
+        res.on("end", () => {
+          try { resolve(JSON.parse(data)); } catch { reject(new Error("Invalid JSON response")); }
+        });
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("Request timeout")); });
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  // Try multiple client types — each has different restrictions
+  const clients = [
+    {
+      name: "IOS",
+      context: {
+        client: { clientName: "IOS", clientVersion: "19.29.1", deviceMake: "Apple", deviceModel: "iPhone16,2", hl: "en", gl: "US", userAgent: "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)" }
+      },
+      ua: "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
+      key: "AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc",
+    },
+    {
+      name: "ANDROID",
+      context: {
+        client: { clientName: "ANDROID", clientVersion: "19.29.37", androidSdkVersion: 34, hl: "en", gl: "US", userAgent: "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip" }
+      },
+      ua: "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip",
+      key: "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
+    },
+    {
+      name: "TV_EMBEDDED",
+      context: {
+        client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" },
+        thirdParty: { embedUrl: "https://www.google.com" },
+      },
+      ua: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+      key: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+    },
+  ];
+
+  let lastErr = null;
+  for (const client of clients) {
+    try {
+      console.log(`🎬 Trying YouTube innertube (${client.name})...`);
+      const playerResp = await httpsPost(
+        `https://www.youtube.com/youtubei/v1/player?key=${client.key}&prettyPrint=false`,
+        { videoId, context: client.context, contentCheckOk: true, racyCheckOk: true },
+        { "User-Agent": client.ua, "X-YouTube-Client-Name": client.name === "IOS" ? "5" : client.name === "ANDROID" ? "3" : "85" }
+      );
+
+      if (playerResp.playabilityStatus?.status !== "OK") {
+        lastErr = new Error(`${client.name}: ${playerResp.playabilityStatus?.reason || "Not available"}`);
+        continue;
+      }
+
+      const formats = [
+        ...(playerResp.streamingData?.formats || []),
+        ...(playerResp.streamingData?.adaptiveFormats || []),
+      ];
+
+      // Prefer: mp4 with audio+video, highest quality
+      let best = formats
+        .filter(f => f.url && f.mimeType?.includes("video/mp4") && f.mimeType?.includes("avc1") && f.audioQuality)
+        .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+      // Fallback: any mp4 with both audio and video
+      if (!best) {
+        best = formats
+          .filter(f => f.url && f.mimeType?.includes("video") && f.audioQuality)
+          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+      }
+
+      if (!best || !best.url) {
+        lastErr = new Error(`${client.name}: No suitable stream found`);
+        continue;
+      }
+
+      console.log(`📥 Downloading ${best.height || "?"}p stream via ${client.name}...`);
+
+      // Download the stream
+      await new Promise((resolve, reject) => {
+        const download = (dlUrl) => {
+          const mod = dlUrl.startsWith("https") ? https : http;
+          mod.get(dlUrl, { headers: { "User-Agent": client.ua }, timeout: 300000 }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+              return download(res.headers.location);
+            }
+            if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+            const ws = fs.createWriteStream(dest);
+            res.pipe(ws);
+            ws.on("finish", () => { ws.close(); resolve(); });
+            ws.on("error", reject);
+          }).on("error", reject).on("timeout", () => reject(new Error("Download timeout")));
+        };
+        download(best.url);
+      });
+
+      if (fs.existsSync(dest) && fs.statSync(dest).size > 50000) {
+        console.log(`✅ YouTube direct download success (${client.name}, ${best.height}p)`);
+        return dest;
+      }
+      try { fs.unlinkSync(dest); } catch {}
+      lastErr = new Error(`${client.name}: Download produced empty file`);
+    } catch (err) {
+      lastErr = err;
+      console.error(`YouTube ${client.name} failed:`, err.message);
+      try { fs.unlinkSync(dest); } catch {}
+    }
+  }
+
+  throw lastErr || new Error("All YouTube download methods failed");
+}
+
+// Download via Cobalt API (backup for non-YouTube platforms)
 async function downloadWithCobalt(url) {
   const dest = path.join(TEMP_DIR, `${Date.now()}_cobalt.mp4`);
 
@@ -2567,7 +2710,21 @@ async function downloadWithYtdlp(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
 
-  // Try Cobalt first (works without cookies, no bot detection)
+  // Method 1: Direct YouTube innertube API (most reliable, no cookies)
+  const ytId = extractYouTubeId(url);
+  if (ytId) {
+    try {
+      const directPath = await downloadYouTubeDirect(ytId);
+      if (fs.existsSync(directPath)) {
+        if (directPath !== dest) fs.renameSync(directPath, dest);
+        return dest;
+      }
+    } catch (directErr) {
+      console.error("YouTube direct failed:", directErr.message);
+    }
+  }
+
+  // Method 2: Cobalt API (works for YouTube, Twitter, TikTok, etc.)
   try {
     const cobaltPath = await downloadWithCobalt(url);
     if (fs.existsSync(cobaltPath)) {
@@ -2575,7 +2732,7 @@ async function downloadWithYtdlp(url, chatId) {
       return dest;
     }
   } catch (cobaltErr) {
-    console.error("Cobalt failed, falling back to yt-dlp:", cobaltErr.message);
+    console.error("Cobalt failed:", cobaltErr.message);
   }
 
   // Fallback: yt-dlp
