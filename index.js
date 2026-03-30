@@ -2260,14 +2260,13 @@ async function downloadWithYtdlp(url, chatId) {
 
   const args = [
     url,
-    "-o", path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    "-f", "best[ext=mp4]/best",
+    "-o", path.join(TEMP_DIR, `${basename}.mp4`),
     "--no-check-certificates",
     "--no-warnings",
     "--concurrent-fragments", "4",
     "--extractor-args", "youtube:player_client=mweb,default",
     "--user-agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "--merge-output-format", "mp4",
+    "--recode-video", "mp4",
   ];
 
   // Use cookies if available
