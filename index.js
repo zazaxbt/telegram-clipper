@@ -846,11 +846,16 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
     const chunks = allChunks;
 
     // Find questions in the transcript
-    bot.sendMessage(chatId, `📊 Step 3/3: Found ${chunks.length} text segments. Searching for Q&A moments...`);
+    // Show what was transcribed so user can verify
+    const transcriptPreview = chunks.slice(0, 10).map((c, idx) => `${idx + 1}. [${formatTime(c.timestamp[0])}] "${c.text}"`).join('\n');
+    bot.sendMessage(chatId, `📊 Step 3/3: Found ${chunks.length} text segments. Searching for Q&A moments...\n\n📝 Transcript preview:\n${transcriptPreview}${chunks.length > 10 ? `\n...and ${chunks.length - 10} more` : ''}`);
     const qaClips = extractQASegments(chunks, clipDuration);
 
     if (qaClips.length === 0) {
-      return bot.sendMessage(chatId, "No questions detected in the video. Try /clip for auto-highlights instead.");
+      // Show all segments so user can see what went wrong
+      const allTexts = chunks.map((c, idx) => `${idx + 1}. [${formatTime(c.timestamp[0])}] "${c.text}"`).join('\n');
+      const debugMsg = allTexts.length > 3500 ? allTexts.slice(0, 3500) + '...' : allTexts;
+      return bot.sendMessage(chatId, `❌ No questions detected in the transcript.\n\n📝 Full transcript:\n${debugMsg}\n\n💡 Tip: The AI transcription may not have captured the questions clearly. Try /clip for auto-highlights instead.`);
     }
 
     bot.sendMessage(chatId, `❓ Found ${qaClips.length} Q&A moment(s). Cutting clips...`);
@@ -2114,15 +2119,57 @@ function extractAudio(videoPath, wavPath, maxDuration) {
   });
 }
 
+function isQuestion(text) {
+  const lower = text.toLowerCase().trim();
+
+  // Explicit question mark
+  if (lower.includes("?")) return true;
+
+  // Starts with common question words/phrases
+  const questionStarters = [
+    /^(who|what|where|when|why|how|which|whose|whom)\b/,
+    /^(is|are|was|were|will|would|could|can|should|shall|do|does|did|have|has|had)\b.*\b(you|we|they|it|he|she|that|this|there)\b/,
+    /^(is|are|was|were|will|would|could|can|should|shall|do|does|did|have|has|had)\s+(it|you|we|they|he|she|that|this|there)\b/,
+    /^(tell me|explain|describe|talk about|what's|what is|how do|how does|how did|how is|how are|how was)/,
+    /^(can you|could you|would you|do you|don't you|didn't you|isn't it|aren't you|won't you)/,
+    /^(so what|and what|but what|then what|okay so what|ok so what|alright so what)/,
+    /^(what do you think|what does that mean|what happened|what about|how about)/,
+    /^(why do|why does|why did|why is|why are|why was|why would|why can)/,
+    /^(have you ever|has anyone|is there|are there|was there|were there)/,
+  ];
+
+  for (const regex of questionStarters) {
+    if (regex.test(lower)) return true;
+  }
+
+  // Contains strong question indicators mid-sentence
+  const questionPhrases = [
+    /\b(what do you think)\b/,
+    /\b(how do you feel)\b/,
+    /\b(can you tell)\b/,
+    /\b(would you say)\b/,
+    /\b(what's your|what is your)\b/,
+    /\b(right\s*$)/,  // ends with "right" (tag question)
+    /\b(you know\s*$)/, // ends with "you know" (tag question)
+  ];
+
+  for (const regex of questionPhrases) {
+    if (regex.test(lower)) return true;
+  }
+
+  return false;
+}
+
 function extractQASegments(chunks, maxClipDuration) {
   const qaClips = [];
   const MAX_QA_DURATION = 60; // max 1 minute per clip
 
   for (let i = 0; i < chunks.length; i++) {
     const text = chunks[i].text.trim();
+    if (!text) continue;
 
-    // Detect questions
-    if (text.includes("?")) {
+    // Detect questions using smart detection
+    if (isQuestion(text)) {
       const question = text;
 
       // Answer starts RIGHT AFTER the question ends (not including the question)
@@ -2135,7 +2182,7 @@ function extractQASegments(chunks, maxClipDuration) {
         const nextEnd = chunks[j].timestamp[1] || chunks[j].timestamp[0];
 
         // Stop if we hit another question or exceed 60 seconds
-        if (nextText.includes("?") || nextEnd - answerStart > MAX_QA_DURATION) {
+        if (isQuestion(nextText) || nextEnd - answerStart > MAX_QA_DURATION) {
           break;
         }
         answerEnd = nextEnd;
