@@ -774,36 +774,58 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
 
       await cutVideo(session.videoPath, start, end, outPath);
 
-      // Auto-caption the clip
+      // Step 1: Jump cut — remove dead air/silence
       await updateProgress(chatId, mid,
-        `✂️ Cutting & captioning...\n\n` +
+        `✂️ Editing clip ${i + 1}/${highlights.length}...\n\n` +
         `${clipBar}\n\n` +
-        `🎞️ Clip ${i + 1}/${highlights.length}\n` +
+        `✂️ Removing dead moments...`
+      );
+      const jumpCutPath = path.join(TEMP_DIR, `clip_jc_${chatId}_${i}.mp4`);
+      let didJumpCut = false;
+      try {
+        didJumpCut = await jumpCutClip(outPath, jumpCutPath);
+        if (didJumpCut && fs.existsSync(jumpCutPath)) {
+          fs.unlinkSync(outPath);
+        } else {
+          try { fs.unlinkSync(jumpCutPath); } catch {}
+        }
+      } catch (jcErr) {
+        console.error("Jump cut failed, continuing:", jcErr.message);
+        try { fs.unlinkSync(jumpCutPath); } catch {}
+      }
+      const editedPath = didJumpCut && fs.existsSync(jumpCutPath) ? jumpCutPath : outPath;
+
+      // Step 2: Auto-caption
+      await updateProgress(chatId, mid,
+        `✂️ Editing clip ${i + 1}/${highlights.length}...\n\n` +
+        `${clipBar}\n\n` +
         `🎤 Adding subtitles...`
       );
       const captionedPath = path.join(TEMP_DIR, `clip_captioned_${chatId}_${i}.mp4`);
+      let editInfo = didJumpCut ? "✂️ Jump cut" : "";
       try {
-        const segCount = await autoCaptionClip(outPath, captionedPath);
+        const segCount = await autoCaptionClip(editedPath, captionedPath);
         if (segCount > 0 && fs.existsSync(captionedPath)) {
-          fs.unlinkSync(outPath);
+          fs.unlinkSync(editedPath);
+          editInfo += (editInfo ? " + " : "") + `🎤 ${segCount} captions`;
           await sendVideoSmart(chatId, captionedPath, {
-            caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)\n🎤 ${segCount} captions`,
+            caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)\n${editInfo}`,
           });
           fs.unlinkSync(captionedPath);
         } else {
           try { fs.unlinkSync(captionedPath); } catch {}
-          await sendVideoSmart(chatId, outPath, {
-            caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)`,
+          await sendVideoSmart(chatId, editedPath, {
+            caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)${editInfo ? "\n" + editInfo : ""}`,
           });
-          fs.unlinkSync(outPath);
+          fs.unlinkSync(editedPath);
         }
       } catch (capErr) {
         console.error("Auto-caption failed, sending without:", capErr.message);
         try { fs.unlinkSync(captionedPath); } catch {}
-        await sendVideoSmart(chatId, outPath, {
-          caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)`,
+        await sendVideoSmart(chatId, editedPath, {
+          caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)${editInfo ? "\n" + editInfo : ""}`,
         });
-        fs.unlinkSync(outPath);
+        try { fs.unlinkSync(editedPath); } catch {}
       }
     }
 
@@ -909,27 +931,36 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
       const { question, start, end } = clipsToSend[i];
       const outPath = path.join(TEMP_DIR, `qa_${chatId}_${i}.mp4`);
 
-      bot.sendMessage(chatId, `✂️ Clip ${i + 1}/${clipsToSend.length}: Cutting & captioning ${formatTime(start)} → ${formatTime(end)}...`);
+      bot.sendMessage(chatId, `✂️ Clip ${i + 1}/${clipsToSend.length}: Editing ${formatTime(start)} → ${formatTime(end)}...`);
       await cutVideo(session.videoPath, start, end, outPath);
 
-      // Auto-caption the Q&A clip
+      // Jump cut + auto-caption the Q&A clip
+      const jumpCutPath = path.join(TEMP_DIR, `qa_jc_${chatId}_${i}.mp4`);
+      let didJumpCut = false;
+      try {
+        didJumpCut = await jumpCutClip(outPath, jumpCutPath);
+        if (didJumpCut && fs.existsSync(jumpCutPath)) fs.unlinkSync(outPath);
+        else try { fs.unlinkSync(jumpCutPath); } catch {}
+      } catch { try { fs.unlinkSync(jumpCutPath); } catch {} }
+      const editedQA = didJumpCut && fs.existsSync(jumpCutPath) ? jumpCutPath : outPath;
+
       const captionedPath = path.join(TEMP_DIR, `qa_captioned_${chatId}_${i}.mp4`);
       const caption = `❓ ${question}\n\n🎬 Clip ${i + 1}/${clipsToSend.length} (${formatTime(start)} → ${formatTime(end)})`;
       try {
-        const segCount = await autoCaptionClip(outPath, captionedPath);
+        const segCount = await autoCaptionClip(editedQA, captionedPath);
         if (segCount > 0 && fs.existsSync(captionedPath)) {
-          fs.unlinkSync(outPath);
+          fs.unlinkSync(editedQA);
           await sendVideoSmart(chatId, captionedPath, { caption: caption.slice(0, 1024) });
           fs.unlinkSync(captionedPath);
         } else {
           try { fs.unlinkSync(captionedPath); } catch {}
-          await sendVideoSmart(chatId, outPath, { caption: caption.slice(0, 1024) });
-          fs.unlinkSync(outPath);
+          await sendVideoSmart(chatId, editedQA, { caption: caption.slice(0, 1024) });
+          fs.unlinkSync(editedQA);
         }
       } catch (capErr) {
         console.error("Q&A auto-caption failed:", capErr.message);
         try { fs.unlinkSync(captionedPath); } catch {}
-        await sendVideoSmart(chatId, outPath, { caption: caption.slice(0, 1024) });
+        await sendVideoSmart(chatId, editedQA, { caption: caption.slice(0, 1024) });
         try { fs.unlinkSync(outPath); } catch {}
       }
     }
@@ -2071,6 +2102,95 @@ function formatASSTime(seconds) {
 }
 
 // Auto-caption a clip: transcribe + burn subtitles
+// Smart jump cut: remove silence/dead moments to make clips feel edited
+async function jumpCutClip(videoPath, outPath) {
+  // Detect silence intervals using FFmpeg silencedetect
+  const silenceData = await new Promise((resolve, reject) => {
+    let stderr = "";
+    ffmpeg(videoPath)
+      .outputOptions(["-af", "silencedetect=noise=-30dB:d=0.4", "-f", "null"])
+      .output(process.platform === "win32" ? "NUL" : "/dev/null")
+      .on("stderr", (line) => { stderr += line + "\n"; })
+      .on("end", () => resolve(stderr))
+      .on("error", reject)
+      .run();
+  });
+
+  // Parse silence start/end from FFmpeg output
+  const silenceIntervals = [];
+  const startRegex = /silence_start:\s*([\d.]+)/g;
+  const endRegex = /silence_end:\s*([\d.]+)/g;
+  const starts = [...silenceData.matchAll(startRegex)].map(m => parseFloat(m[1]));
+  const ends = [...silenceData.matchAll(endRegex)].map(m => parseFloat(m[1]));
+
+  for (let i = 0; i < Math.min(starts.length, ends.length); i++) {
+    // Only cut silences longer than 0.5s, keep a tiny pad for natural feel
+    const dur = ends[i] - starts[i];
+    if (dur > 0.5) {
+      silenceIntervals.push({ start: starts[i] + 0.1, end: ends[i] - 0.1 });
+    }
+  }
+
+  // If no meaningful silence found, skip jump cutting
+  if (silenceIntervals.length === 0) {
+    fs.copyFileSync(videoPath, outPath);
+    return false;
+  }
+
+  // Get video duration
+  const duration = await getVideoDuration(videoPath);
+
+  // Build list of segments to KEEP (invert the silence intervals)
+  const keepSegments = [];
+  let cursor = 0;
+  for (const silence of silenceIntervals) {
+    if (silence.start > cursor + 0.3) {
+      keepSegments.push({ start: cursor, end: silence.start });
+    }
+    cursor = silence.end;
+  }
+  if (cursor < duration - 0.3) {
+    keepSegments.push({ start: cursor, end: duration });
+  }
+
+  // If we'd keep everything or almost everything, skip
+  if (keepSegments.length <= 1) {
+    fs.copyFileSync(videoPath, outPath);
+    return false;
+  }
+
+  // Cut each segment and concat
+  const segPaths = [];
+  for (let i = 0; i < keepSegments.length; i++) {
+    const seg = keepSegments[i];
+    const segPath = videoPath.replace(/\.mp4$/, `_seg${i}.mp4`);
+    segPaths.push(segPath);
+    await new Promise((resolve, reject) => {
+      ffmpeg(videoPath)
+        .setStartTime(seg.start)
+        .setDuration(seg.end - seg.start)
+        .output(segPath)
+        .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast", "-avoid_negative_ts", "make_zero"])
+        .on("end", resolve).on("error", reject).run();
+    });
+  }
+
+  // Concat segments
+  const listPath = videoPath.replace(/\.mp4$/, "_jumpcut_list.txt");
+  fs.writeFileSync(listPath, segPaths.map(p => `file '${p}'`).join("\n"));
+  await new Promise((resolve, reject) => {
+    ffmpeg().input(listPath).inputOptions(["-f", "concat", "-safe", "0"]).output(outPath)
+      .outputOptions(["-c", "copy"])
+      .on("end", resolve).on("error", reject).run();
+  });
+
+  // Cleanup temp segments
+  segPaths.forEach(p => { try { fs.unlinkSync(p); } catch {} });
+  try { fs.unlinkSync(listPath); } catch {}
+
+  return true;
+}
+
 async function autoCaptionClip(videoPath, outPath) {
   // Extract audio
   const wavPath = videoPath.replace(/\.mp4$/, '_cap_audio.wav');
