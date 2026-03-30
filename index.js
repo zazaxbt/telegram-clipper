@@ -774,11 +774,37 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
 
       await cutVideo(session.videoPath, start, end, outPath);
 
-      await sendVideoSmart(chatId, outPath, {
-        caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)`,
-      });
-
-      fs.unlinkSync(outPath);
+      // Auto-caption the clip
+      await updateProgress(chatId, mid,
+        `✂️ Cutting & captioning...\n\n` +
+        `${clipBar}\n\n` +
+        `🎞️ Clip ${i + 1}/${highlights.length}\n` +
+        `🎤 Adding subtitles...`
+      );
+      const captionedPath = path.join(TEMP_DIR, `clip_captioned_${chatId}_${i}.mp4`);
+      try {
+        const segCount = await autoCaptionClip(outPath, captionedPath);
+        if (segCount > 0 && fs.existsSync(captionedPath)) {
+          fs.unlinkSync(outPath);
+          await sendVideoSmart(chatId, captionedPath, {
+            caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)\n🎤 ${segCount} captions`,
+          });
+          fs.unlinkSync(captionedPath);
+        } else {
+          try { fs.unlinkSync(captionedPath); } catch {}
+          await sendVideoSmart(chatId, outPath, {
+            caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)`,
+          });
+          fs.unlinkSync(outPath);
+        }
+      } catch (capErr) {
+        console.error("Auto-caption failed, sending without:", capErr.message);
+        try { fs.unlinkSync(captionedPath); } catch {}
+        await sendVideoSmart(chatId, outPath, {
+          caption: `🎬 Clip ${i + 1}/${highlights.length} (${formatTime(start)} → ${formatTime(end)}, ${clipDur}s)`,
+        });
+        fs.unlinkSync(outPath);
+      }
     }
 
     // Clean up source video to free disk space
@@ -883,16 +909,29 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
       const { question, start, end } = clipsToSend[i];
       const outPath = path.join(TEMP_DIR, `qa_${chatId}_${i}.mp4`);
 
-      bot.sendMessage(chatId, `✂️ Clip ${i + 1}/${clipsToSend.length}: Cutting ${formatTime(start)} → ${formatTime(end)}...`);
+      bot.sendMessage(chatId, `✂️ Clip ${i + 1}/${clipsToSend.length}: Cutting & captioning ${formatTime(start)} → ${formatTime(end)}...`);
       await cutVideo(session.videoPath, start, end, outPath);
 
-      bot.sendMessage(chatId, `📤 Clip ${i + 1}/${clipsToSend.length}: Sending...`);
+      // Auto-caption the Q&A clip
+      const captionedPath = path.join(TEMP_DIR, `qa_captioned_${chatId}_${i}.mp4`);
       const caption = `❓ ${question}\n\n🎬 Clip ${i + 1}/${clipsToSend.length} (${formatTime(start)} → ${formatTime(end)})`;
-      await sendVideoSmart(chatId, outPath, {
-        caption: caption.slice(0, 1024),
-      });
-
-      try { fs.unlinkSync(outPath); } catch {}
+      try {
+        const segCount = await autoCaptionClip(outPath, captionedPath);
+        if (segCount > 0 && fs.existsSync(captionedPath)) {
+          fs.unlinkSync(outPath);
+          await sendVideoSmart(chatId, captionedPath, { caption: caption.slice(0, 1024) });
+          fs.unlinkSync(captionedPath);
+        } else {
+          try { fs.unlinkSync(captionedPath); } catch {}
+          await sendVideoSmart(chatId, outPath, { caption: caption.slice(0, 1024) });
+          fs.unlinkSync(outPath);
+        }
+      } catch (capErr) {
+        console.error("Q&A auto-caption failed:", capErr.message);
+        try { fs.unlinkSync(captionedPath); } catch {}
+        await sendVideoSmart(chatId, outPath, { caption: caption.slice(0, 1024) });
+        try { fs.unlinkSync(outPath); } catch {}
+      }
     }
 
     // Clean up source video to free disk space
@@ -2029,6 +2068,62 @@ function formatASSTime(seconds) {
   const s = Math.floor(seconds % 60);
   const cs = Math.floor((seconds % 1) * 100);
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
+}
+
+// Auto-caption a clip: transcribe + burn subtitles
+async function autoCaptionClip(videoPath, outPath) {
+  // Extract audio
+  const wavPath = videoPath.replace(/\.mp4$/, '_cap_audio.wav');
+  await new Promise((resolve, reject) => {
+    ffmpeg(videoPath).output(wavPath)
+      .outputOptions(["-ar", "16000", "-ac", "1", "-f", "wav"])
+      .on("end", resolve).on("error", reject).run();
+  });
+
+  let chunks;
+  try {
+    chunks = await transcribeWithWhisper(wavPath);
+  } finally {
+    try { fs.unlinkSync(wavPath); } catch {}
+  }
+
+  if (!chunks || chunks.length === 0) {
+    // No speech detected — just copy the file as-is
+    fs.copyFileSync(videoPath, outPath);
+    return 0;
+  }
+
+  // Build ASS subtitle file (CapCut style — bold white text, black outline, bottom center)
+  const assPath = videoPath.replace(/\.mp4$/, '_subs.ass');
+  let assContent = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,60,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
+
+  for (const chunk of chunks) {
+    const startTime = formatASSTime(chunk.timestamp[0]);
+    const endTime = formatASSTime(chunk.timestamp[1]);
+    const text = chunk.text.replace(/\n/g, "\\N").toUpperCase();
+    assContent += `Dialogue: 0,${startTime},${endTime},Default,,0,0,0,,${text}\n`;
+  }
+  fs.writeFileSync(assPath, assContent);
+
+  // Burn subtitles onto video
+  await new Promise((resolve, reject) => {
+    ffmpeg(videoPath).output(outPath)
+      .outputOptions(["-vf", `ass=${assPath}`, "-c:a", "copy", "-preset", "ultrafast"])
+      .on("end", resolve).on("error", reject).run();
+  });
+
+  try { fs.unlinkSync(assPath); } catch {}
+  return chunks.length;
 }
 
 // =============================================
