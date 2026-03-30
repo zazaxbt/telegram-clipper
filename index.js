@@ -2033,7 +2033,16 @@ function formatASSTime(seconds) {
 // =============================================
 
 async function downloadTelegramFile(fileId, msg) {
-  // Try Bot API first (works for files <50MB)
+  const reportedSize = msg.video?.file_size || msg.document?.file_size || 0;
+  const MAX_BOT_API_DL = 20 * 1024 * 1024; // Bot API limit is 20MB for downloads
+
+  // If file is too large for Bot API, go straight to GramJS
+  if (reportedSize > MAX_BOT_API_DL) {
+    console.log(`📥 File is ${(reportedSize / 1024 / 1024).toFixed(1)}MB — using GramJS for download`);
+    return downloadWithGramJS(msg);
+  }
+
+  // Try Bot API first (works for files <20MB)
   try {
     const file = await bot.getFile(fileId);
     const url = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
@@ -2048,10 +2057,18 @@ async function downloadTelegramFile(fileId, msg) {
       }).on("error", reject);
     });
 
+    // Verify download is complete (Bot API can silently truncate)
+    const dlSize = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
+    if (reportedSize > 0 && dlSize < reportedSize * 0.9) {
+      console.log(`⚠️ Bot API download incomplete (${dlSize} vs ${reportedSize}), falling back to GramJS`);
+      try { fs.unlinkSync(dest); } catch {}
+      return downloadWithGramJS(msg);
+    }
+
     return dest;
   } catch (err) {
     // If file too big, fall back to GramJS
-    if (err.message && err.message.includes("file is too big")) {
+    if (err.message && (err.message.includes("file is too big") || err.message.includes("too large"))) {
       return downloadWithGramJS(msg);
     }
     throw err;
