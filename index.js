@@ -1623,20 +1623,23 @@ bot.onText(/^\/musiclib(?:\s+(.+))?$/, async (msg, match) => {
       const dest = path.join(TEMP_DIR, `musiclib_${chatId}.mp3`);
 
       await new Promise((resolve, reject) => {
-        const ytOpts = {
-          output: dest,
-          extractAudio: true,
-          audioFormat: "mp3",
-          audioQuality: 5,
-          noCheckCertificates: true,
-          noWarnings: true,
-          defaultSearch: "ytsearch1",
-          format: "bestaudio",
-        };
+        const args = [
+          `ytsearch1:${query} royalty free music no copyright`,
+          "-o", dest,
+          "-x", "--audio-format", "mp3",
+          "--audio-quality", "5",
+          "--no-check-certificates",
+          "--no-warnings",
+          "-f", "bestaudio",
+          "--extractor-args", "youtube:player_client=mweb,default",
+          "--user-agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        ];
         const cookiesPath = path.join(__dirname, "cookies.txt");
-        if (fs.existsSync(cookiesPath)) ytOpts.cookies = cookiesPath;
-        youtubedl(`ytsearch1:${query}`, ytOpts)
-          .then(resolve).catch(reject);
+        if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
+        const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"] });
+        proc.stdout.on("data", () => {});
+        proc.stderr.on("data", () => {});
+        proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`yt-dlp music search failed (code ${code})`)));
       });
 
       // Find the downloaded file
@@ -2255,30 +2258,36 @@ async function downloadWithYtdlp(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
 
-  // 5 minute timeout for downloads
-  const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error("Download timed out after 15 minutes")), 15 * 60 * 1000)
-  );
-
-  const ytdlpOpts = {
-    output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    format: "bestvideo+bestaudio/bestvideo+ba/bv+bestaudio/best/bv*+ba/b",
-    mergeOutputFormat: "mp4",
-    noCheckCertificates: true,
-    noWarnings: true,
-    concurrentFragments: 4,
-    recodeVideo: "mp4",
-  };
+  const args = [
+    url,
+    "-o", path.join(TEMP_DIR, `${basename}.%(ext)s`),
+    "-f", "best[ext=mp4]/best",
+    "--no-check-certificates",
+    "--no-warnings",
+    "--concurrent-fragments", "4",
+    "--extractor-args", "youtube:player_client=mweb,default",
+    "--user-agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "--merge-output-format", "mp4",
+  ];
 
   // Use cookies if available
   const cookiesPath = path.join(__dirname, "cookies.txt");
   if (fs.existsSync(cookiesPath)) {
-    ytdlpOpts.cookies = cookiesPath;
+    args.push("--cookies", cookiesPath);
   }
 
-  const download = youtubedl(url, ytdlpOpts);
-
-  await Promise.race([download, timeout]);
+  await new Promise((resolve, reject) => {
+    const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stderr = "";
+    const timer = setTimeout(() => { proc.kill(); reject(new Error("Download timed out after 15 minutes")); }, 15 * 60 * 1000);
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.stdout.on("data", () => {}); // drain
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(stderr.split("\n").filter(l => l.includes("ERROR")).join(" ") || `yt-dlp exited with code ${code}`));
+    });
+  });
 
   // yt-dlp may save with a slightly different name, find the actual file
   if (fs.existsSync(dest)) return dest;
@@ -2290,7 +2299,7 @@ async function downloadWithYtdlp(url, chatId) {
     return dest;
   }
 
-  throw new Error("yt-dlp download failed");
+  throw new Error("yt-dlp download failed — no output file found");
 }
 
 function downloadFromUrl(url, chatId) {
