@@ -2262,11 +2262,12 @@ async function downloadWithYtdlp(url, chatId) {
 
   const ytdlpOpts = {
     output: path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    format: "bv*+ba/b",
+    format: "bestvideo+bestaudio/bestvideo+ba/bv+bestaudio/best/bv*+ba/b",
     mergeOutputFormat: "mp4",
     noCheckCertificates: true,
     noWarnings: true,
     concurrentFragments: 4,
+    recodeVideo: "mp4",
   };
 
   // Use cookies if available
