@@ -2469,10 +2469,116 @@ function extractQASegments(chunks, maxClipDuration) {
   return filtered;
 }
 
+// Download via Cobalt API (no cookies needed, supports YouTube, Twitter, etc.)
+async function downloadWithCobalt(url) {
+  const dest = path.join(TEMP_DIR, `${Date.now()}_cobalt.mp4`);
+
+  // List of public Cobalt API instances to try
+  const cobaltInstances = [
+    "https://api.cobalt.tools",
+    "https://cobalt-api.kwiatekmiki.com",
+    "https://cobalt.api.timelessnesses.me",
+  ];
+
+  let lastErr = null;
+  for (const apiBase of cobaltInstances) {
+    try {
+      console.log(`🔗 Trying Cobalt: ${apiBase}`);
+      const response = await new Promise((resolve, reject) => {
+        const postData = JSON.stringify({
+          url: url,
+          videoQuality: "1080",
+          filenameStyle: "basic",
+        });
+        const urlObj = new URL(`${apiBase}/`);
+        const reqOpts = {
+          hostname: urlObj.hostname,
+          port: urlObj.port || 443,
+          path: "/",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Content-Length": Buffer.byteLength(postData),
+          },
+          timeout: 30000,
+        };
+        const req = https.request(reqOpts, (res) => {
+          let data = "";
+          res.on("data", (chunk) => { data += chunk; });
+          res.on("end", () => {
+            try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
+            catch { reject(new Error(`Invalid JSON from Cobalt: ${data.slice(0, 200)}`)); }
+          });
+        });
+        req.on("error", reject);
+        req.on("timeout", () => { req.destroy(); reject(new Error("Cobalt API timeout")); });
+        req.write(postData);
+        req.end();
+      });
+
+      if (response.data.status === "error") {
+        lastErr = new Error(response.data.error?.code || "Cobalt returned error");
+        continue;
+      }
+
+      // Get the download URL
+      const dlUrl = response.data.url;
+      if (!dlUrl) {
+        lastErr = new Error("No download URL from Cobalt");
+        continue;
+      }
+
+      // Download the file
+      await new Promise((resolve, reject) => {
+        const download = (downloadUrl) => {
+          const mod = downloadUrl.startsWith("https") ? https : http;
+          mod.get(downloadUrl, { timeout: 300000 }, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+              return download(res.headers.location);
+            }
+            if (res.statusCode !== 200) return reject(new Error(`Download HTTP ${res.statusCode}`));
+            const ws = fs.createWriteStream(dest);
+            res.pipe(ws);
+            ws.on("finish", () => { ws.close(); resolve(); });
+            ws.on("error", reject);
+          }).on("error", reject);
+        };
+        download(dlUrl);
+      });
+
+      if (fs.existsSync(dest) && fs.statSync(dest).size > 10000) {
+        console.log(`✅ Cobalt download success from ${apiBase}`);
+        return dest;
+      }
+      try { fs.unlinkSync(dest); } catch {}
+      lastErr = new Error("Cobalt download produced empty file");
+    } catch (err) {
+      lastErr = err;
+      console.error(`Cobalt ${apiBase} failed:`, err.message);
+      try { fs.unlinkSync(dest); } catch {}
+    }
+  }
+
+  throw lastErr || new Error("All Cobalt instances failed");
+}
+
 async function downloadWithYtdlp(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
 
+  // Try Cobalt first (works without cookies, no bot detection)
+  try {
+    const cobaltPath = await downloadWithCobalt(url);
+    if (fs.existsSync(cobaltPath)) {
+      if (cobaltPath !== dest) fs.renameSync(cobaltPath, dest);
+      return dest;
+    }
+  } catch (cobaltErr) {
+    console.error("Cobalt failed, falling back to yt-dlp:", cobaltErr.message);
+  }
+
+  // Fallback: yt-dlp
   const args = [
     url,
     "-o", path.join(TEMP_DIR, `${basename}.mp4`),
@@ -2484,7 +2590,6 @@ async function downloadWithYtdlp(url, chatId) {
     "--recode-video", "mp4",
   ];
 
-  // Use cookies if available
   const cookiesPath = path.join(__dirname, "cookies.txt");
   if (fs.existsSync(cookiesPath)) {
     args.push("--cookies", cookiesPath);
@@ -2495,7 +2600,7 @@ async function downloadWithYtdlp(url, chatId) {
     let stderr = "";
     const timer = setTimeout(() => { proc.kill(); reject(new Error("Download timed out after 15 minutes")); }, 15 * 60 * 1000);
     proc.stderr.on("data", (d) => { stderr += d.toString(); });
-    proc.stdout.on("data", () => {}); // drain
+    proc.stdout.on("data", () => {});
     proc.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0) resolve();
@@ -2503,7 +2608,6 @@ async function downloadWithYtdlp(url, chatId) {
     });
   });
 
-  // yt-dlp may save with a slightly different name, find the actual file
   if (fs.existsSync(dest)) return dest;
 
   const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(basename));
@@ -2513,7 +2617,7 @@ async function downloadWithYtdlp(url, chatId) {
     return dest;
   }
 
-  throw new Error("yt-dlp download failed — no output file found");
+  throw new Error("Download failed — both Cobalt and yt-dlp could not fetch this video");
 }
 
 function downloadFromUrl(url, chatId) {
