@@ -2851,72 +2851,77 @@ async function downloadWithCobalt(url) {
 async function downloadWithYtdlpOnly(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
+  const cookiesPath = path.join(__dirname, "cookies.txt");
+  const hasCookies = fs.existsSync(cookiesPath);
 
-  // Download ANY available format — no format restrictions at all
-  const args = [
-    url,
-    "-o", path.join(TEMP_DIR, `${basename}.%(ext)s`),
-    "--no-check-certificates",
-    "--no-warnings",
-    "--extractor-args", "youtube:player_client=web_creator,mediaconnect",
+  // Try multiple player client combos — YouTube blocks different ones
+  const attempts = [
+    { client: "mweb", useCookies: true },
+    { client: "web_creator", useCookies: true },
+    { client: "default", useCookies: true },
+    { client: "mweb", useCookies: false },
+    { client: "default", useCookies: false },
   ];
 
-  const cookiesPath = path.join(__dirname, "cookies.txt");
-  if (fs.existsSync(cookiesPath)) {
-    args.push("--cookies", cookiesPath);
-  }
-
-  await new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
-    let stderr = "";
-    const timer = setTimeout(() => { proc.kill(); reject(new Error("Download timed out after 15 minutes")); }, 15 * 60 * 1000);
-    proc.stderr.on("data", (d) => { stderr += d.toString(); });
-    proc.stdout.on("data", () => {});
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(stderr.split("\n").filter(l => l.includes("ERROR")).join(" ") || `yt-dlp exited with code ${code}`));
-    });
-  });
-
-  // Find the downloaded file (could be .mp4, .webm, .mkv, etc)
-  if (fs.existsSync(dest)) return dest;
-
-  const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(basename));
-  if (files.length > 0) {
-    const actual = path.join(TEMP_DIR, files[0]);
-    // If not mp4, convert with ffmpeg
-    if (!actual.endsWith(".mp4")) {
-      await new Promise((resolve, reject) => {
-        ffmpeg(actual).output(dest)
-          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
-          .on("end", () => { try { fs.unlinkSync(actual); } catch {} resolve(); })
-          .on("error", reject).run();
-      });
-      return dest;
+  let lastErr = null;
+  for (const attempt of attempts) {
+    const args = [
+      url,
+      "-o", path.join(TEMP_DIR, `${basename}.%(ext)s`),
+      "--no-check-certificates",
+      "--no-warnings",
+    ];
+    if (attempt.client !== "default") {
+      args.push("--extractor-args", `youtube:player_client=${attempt.client}`);
     }
-    if (actual !== dest) fs.renameSync(actual, dest);
-    return dest;
-  }
-
-  // Check for partial files too
-  const allFiles = fs.readdirSync(TEMP_DIR).filter(f => f.includes(String(chatId)));
-  if (allFiles.length > 0) {
-    const actual = path.join(TEMP_DIR, allFiles[allFiles.length - 1]);
-    if (!actual.endsWith(".mp4")) {
-      await new Promise((resolve, reject) => {
-        ffmpeg(actual).output(dest)
-          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
-          .on("end", () => { try { fs.unlinkSync(actual); } catch {} resolve(); })
-          .on("error", reject).run();
-      });
-      return dest;
+    if (attempt.useCookies && hasCookies) {
+      args.push("--cookies", cookiesPath);
     }
-    if (actual !== dest) fs.renameSync(actual, dest);
-    return dest;
+
+    console.log(`📥 yt-dlp attempt: client=${attempt.client}, cookies=${attempt.useCookies && hasCookies}`);
+
+    try {
+      await new Promise((resolve, reject) => {
+        const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
+        let stderr = "";
+        const timer = setTimeout(() => { proc.kill(); reject(new Error("timeout")); }, 90000);
+        proc.stderr.on("data", (d) => { stderr += d.toString(); });
+        proc.stdout.on("data", () => {});
+        proc.on("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0) resolve();
+          else reject(new Error(stderr.split("\n").filter(l => l.includes("ERROR")).join(" ").slice(0, 200) || `exit ${code}`));
+        });
+      });
+
+      // Check if file was created
+      if (fs.existsSync(dest)) return dest;
+      const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(basename));
+      if (files.length > 0) {
+        const actual = path.join(TEMP_DIR, files[0]);
+        if (!actual.endsWith(".mp4")) {
+          await new Promise((resolve, reject) => {
+            ffmpeg(actual).output(dest)
+              .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+              .on("end", () => { try { fs.unlinkSync(actual); } catch {} resolve(); })
+              .on("error", reject).run();
+          });
+          return dest;
+        }
+        if (actual !== dest) fs.renameSync(actual, dest);
+        return dest;
+      }
+    } catch (err) {
+      lastErr = err;
+      console.error(`yt-dlp ${attempt.client} failed:`, err.message.slice(0, 100));
+      // Clean up any partial files
+      fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(basename)).forEach(f => {
+        try { fs.unlinkSync(path.join(TEMP_DIR, f)); } catch {}
+      });
+    }
   }
 
-  throw new Error("yt-dlp produced no output file");
+  throw lastErr || new Error("All yt-dlp attempts failed");
 }
 
 function downloadFromUrl(url, chatId) {
