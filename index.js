@@ -82,6 +82,12 @@ const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
 const TEMP_DIR = path.join(__dirname, "temp");
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
 
+// Ensure yt-dlp can find node for YouTube JS challenge solving
+const YTDLP_ENV = {
+  ...process.env,
+  PATH: `/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ""}`,
+};
+
 // GramJS client for large file downloads (up to 2GB)
 const API_ID = parseInt(process.env.TELEGRAM_API_ID);
 const API_HASH = process.env.TELEGRAM_API_HASH;
@@ -481,7 +487,7 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
         const fmtArgs = ["--list-formats", testUrl, "--no-warnings", "-v"];
         if (cookiesExist) fmtArgs.push("--cookies", cookiesPath);
         const { stdout: fmtOut, stderr: fmtErr } = await new Promise((resolve, reject) => {
-          const proc = spawn("yt-dlp", fmtArgs, { stdio: ["pipe", "pipe", "pipe"] });
+          const proc = spawn("yt-dlp", fmtArgs, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
           let out = "", err = "";
           proc.stdout.on("data", (d) => { out += d; });
           proc.stderr.on("data", (d) => { err += d; });
@@ -505,7 +511,7 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
         const dlArgs = [testUrl, "-o", testDest, "--no-warnings"];
         if (cookiesExist) dlArgs.push("--cookies", cookiesPath);
         const { stderr: dlErr } = await new Promise((resolve, reject) => {
-          const proc = spawn("yt-dlp", dlArgs, { stdio: ["pipe", "pipe", "pipe"] });
+          const proc = spawn("yt-dlp", dlArgs, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
           let err = "";
           proc.stdout.on("data", () => {});
           proc.stderr.on("data", (d) => { err += d; });
@@ -1840,7 +1846,7 @@ bot.onText(/^\/musiclib(?:\s+(.+))?$/, async (msg, match) => {
         ];
         const cookiesPath = path.join(__dirname, "cookies.txt");
         if (fs.existsSync(cookiesPath)) args.push("--cookies", cookiesPath);
-        const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"] });
+        const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
         proc.stdout.on("data", () => {});
         proc.stderr.on("data", () => {});
         proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`yt-dlp music search failed (code ${code})`)));
@@ -2825,7 +2831,7 @@ async function downloadWithYtdlpOnly(url, chatId) {
   }
 
   await new Promise((resolve, reject) => {
-    const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const proc = spawn("yt-dlp", args, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
     let stderr = "";
     const timer = setTimeout(() => { proc.kill(); reject(new Error("Download timed out after 15 minutes")); }, 15 * 60 * 1000);
     proc.stderr.on("data", (d) => { stderr += d.toString(); });
