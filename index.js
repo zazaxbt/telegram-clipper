@@ -429,35 +429,36 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
   const testUrl = match[1] || "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
   const ytId = extractYouTubeId(testUrl);
 
+  const statusMsg = await bot.sendMessage(chatId, `🔍 Debug: ${testUrl}\nYT ID: ${ytId || "not YouTube"}\n\nTesting...`);
   let report = `🔍 Debug: ${testUrl}\nYT ID: ${ytId || "not YouTube"}\n\n`;
 
-  // Test innertube
+  // Test Invidious
   if (ytId) {
     try {
-      report += "▶️ Testing innertube...\n";
-      const path = await downloadYouTubeDirect(ytId);
-      const size = fs.existsSync(path) ? (fs.statSync(path).size / 1024 / 1024).toFixed(1) : 0;
-      report += `✅ Innertube: ${size}MB\n`;
-      try { fs.unlinkSync(path); } catch {}
+      await updateProgress(chatId, statusMsg.message_id, report + "▶️ Testing Invidious...");
+      const dlPath = await downloadYouTubeDirect(ytId);
+      const size = fs.existsSync(dlPath) ? (fs.statSync(dlPath).size / 1024 / 1024).toFixed(1) : 0;
+      report += `✅ Invidious: ${size}MB\n`;
+      try { fs.unlinkSync(dlPath); } catch {}
     } catch (err) {
-      report += `❌ Innertube: ${err.message.slice(0, 150)}\n`;
+      report += `❌ Invidious: ${err.message.slice(0, 200)}\n`;
     }
   }
 
   // Test cobalt
   try {
-    report += "\n▶️ Testing Cobalt...\n";
-    const path = await downloadWithCobalt(testUrl);
-    const size = fs.existsSync(path) ? (fs.statSync(path).size / 1024 / 1024).toFixed(1) : 0;
-    report += `✅ Cobalt: ${size}MB\n`;
-    try { fs.unlinkSync(path); } catch {}
+    await updateProgress(chatId, statusMsg.message_id, report + "\n▶️ Testing Cobalt...");
+    const dlPath = await downloadWithCobalt(testUrl);
+    const size = fs.existsSync(dlPath) ? (fs.statSync(dlPath).size / 1024 / 1024).toFixed(1) : 0;
+    report += `\n✅ Cobalt: ${size}MB\n`;
+    try { fs.unlinkSync(dlPath); } catch {}
   } catch (err) {
-    report += `❌ Cobalt: ${err.message.slice(0, 150)}\n`;
+    report += `\n❌ Cobalt: ${err.message.slice(0, 200)}\n`;
   }
 
-  // Test yt-dlp version
+  // Test yt-dlp
   try {
-    report += "\n▶️ Checking yt-dlp...\n";
+    await updateProgress(chatId, statusMsg.message_id, report + "\n▶️ Checking yt-dlp...");
     const ver = await new Promise((resolve, reject) => {
       const proc = spawn("yt-dlp", ["--version"], { stdio: ["pipe", "pipe", "pipe"] });
       let out = "";
@@ -465,12 +466,29 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
       proc.on("close", (code) => code === 0 ? resolve(out.trim()) : reject(new Error("not found")));
       proc.on("error", reject);
     });
-    report += `yt-dlp version: ${ver}\n`;
+    report += `\nyt-dlp version: ${ver}\n`;
+
+    // Also list available formats for this video
+    if (ytId) {
+      try {
+        const formats = await new Promise((resolve, reject) => {
+          const proc = spawn("yt-dlp", ["--list-formats", testUrl, "--no-warnings"], { stdio: ["pipe", "pipe", "pipe"] });
+          let out = "";
+          proc.stdout.on("data", (d) => { out += d; });
+          proc.stderr.on("data", () => {});
+          proc.on("close", () => resolve(out));
+          proc.on("error", reject);
+          setTimeout(() => { proc.kill(); resolve("timeout"); }, 30000);
+        });
+        const lines = formats.split("\n").filter(l => l.includes("mp4") || l.includes("webm") || l.includes("ID")).slice(0, 10);
+        report += `\n📋 Formats:\n${lines.join("\n").slice(0, 500)}\n`;
+      } catch {}
+    }
   } catch {
-    report += "❌ yt-dlp not installed\n";
+    report += "\n❌ yt-dlp not installed\n";
   }
 
-  bot.sendMessage(chatId, report);
+  await updateProgress(chatId, statusMsg.message_id, report);
 });
 
 bot.onText(/\/status/, (msg) => {
@@ -2555,107 +2573,62 @@ function extractYouTubeId(url) {
   return null;
 }
 
-// Download YouTube video directly via innertube API (no cookies, no yt-dlp)
+// Download YouTube via Invidious public instances (free YouTube proxy, no auth needed)
 async function downloadYouTubeDirect(videoId) {
   const dest = path.join(TEMP_DIR, `${Date.now()}_yt_${videoId}.mp4`);
 
-  function httpsPost(urlStr, body, headers = {}) {
+  function httpsGet(urlStr, timeout = 15000) {
     return new Promise((resolve, reject) => {
-      const urlObj = new URL(urlStr);
-      const postData = JSON.stringify(body);
-      const req = https.request({
-        hostname: urlObj.hostname,
-        path: urlObj.pathname + urlObj.search,
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData), ...headers },
-        timeout: 15000,
-      }, (res) => {
+      const mod = urlStr.startsWith("https") ? https : http;
+      mod.get(urlStr, { timeout, headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          return httpsGet(res.headers.location, timeout).then(resolve).catch(reject);
+        }
         let data = "";
         res.on("data", (c) => { data += c; });
-        res.on("end", () => {
-          try { resolve(JSON.parse(data)); } catch { reject(new Error("Invalid JSON response")); }
-        });
-      });
-      req.on("error", reject);
-      req.on("timeout", () => { req.destroy(); reject(new Error("Request timeout")); });
-      req.write(postData);
-      req.end();
+        res.on("end", () => resolve({ status: res.statusCode, data }));
+      }).on("error", reject).on("timeout", function() { this.destroy(); reject(new Error("timeout")); });
     });
   }
 
-  // Try multiple client types — each has different restrictions
-  const clients = [
-    {
-      name: "IOS",
-      context: {
-        client: { clientName: "IOS", clientVersion: "19.29.1", deviceMake: "Apple", deviceModel: "iPhone16,2", hl: "en", gl: "US", userAgent: "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)" }
-      },
-      ua: "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
-      key: "AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc",
-    },
-    {
-      name: "ANDROID",
-      context: {
-        client: { clientName: "ANDROID", clientVersion: "19.29.37", androidSdkVersion: 34, hl: "en", gl: "US", userAgent: "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip" }
-      },
-      ua: "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip",
-      key: "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
-    },
-    {
-      name: "TV_EMBEDDED",
-      context: {
-        client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "2.0", hl: "en", gl: "US" },
-        thirdParty: { embedUrl: "https://www.google.com" },
-      },
-      ua: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
-      key: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
-    },
+  // Invidious instances that provide direct video URLs
+  const instances = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://invidious.jing.rocks",
+    "https://vid.puffyan.us",
+    "https://invidious.privacyredirect.com",
   ];
 
   let lastErr = null;
-  for (const client of clients) {
+  for (const instance of instances) {
     try {
-      console.log(`🎬 Trying YouTube innertube (${client.name})...`);
-      const playerResp = await httpsPost(
-        `https://www.youtube.com/youtubei/v1/player?key=${client.key}&prettyPrint=false`,
-        { videoId, context: client.context, contentCheckOk: true, racyCheckOk: true },
-        { "User-Agent": client.ua, "X-YouTube-Client-Name": client.name === "IOS" ? "5" : client.name === "ANDROID" ? "3" : "85" }
-      );
+      console.log(`🔗 Trying Invidious: ${instance}`);
+      const resp = await httpsGet(`${instance}/api/v1/videos/${videoId}?fields=formatStreams,adaptiveFormats`);
+      if (resp.status !== 200) { lastErr = new Error(`HTTP ${resp.status}`); continue; }
 
-      if (playerResp.playabilityStatus?.status !== "OK") {
-        lastErr = new Error(`${client.name}: ${playerResp.playabilityStatus?.reason || "Not available"}`);
-        continue;
-      }
+      const data = JSON.parse(resp.data);
+      const streams = [...(data.formatStreams || []), ...(data.adaptiveFormats || [])];
 
-      const formats = [
-        ...(playerResp.streamingData?.formats || []),
-        ...(playerResp.streamingData?.adaptiveFormats || []),
-      ];
+      // Prefer combined stream (video+audio) in mp4
+      let best = streams
+        .filter(s => s.url && s.type?.includes("video/mp4") && s.type?.includes("avc1") && s.encoding === "aac")
+        .sort((a, b) => (parseInt(b.resolution) || 0) - (parseInt(a.resolution) || 0))[0];
 
-      // Prefer: mp4 with audio+video, highest quality
-      let best = formats
-        .filter(f => f.url && f.mimeType?.includes("video/mp4") && f.mimeType?.includes("avc1") && f.audioQuality)
-        .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-
-      // Fallback: any mp4 with both audio and video
       if (!best) {
-        best = formats
-          .filter(f => f.url && f.mimeType?.includes("video") && f.audioQuality)
-          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+        best = streams
+          .filter(s => s.url && s.type?.includes("video"))
+          .sort((a, b) => (parseInt(b.resolution) || 0) - (parseInt(a.resolution) || 0))[0];
       }
 
-      if (!best || !best.url) {
-        lastErr = new Error(`${client.name}: No suitable stream found`);
-        continue;
-      }
+      if (!best || !best.url) { lastErr = new Error("No streams found"); continue; }
 
-      console.log(`📥 Downloading ${best.height || "?"}p stream via ${client.name}...`);
+      console.log(`📥 Downloading ${best.resolution || "?"}p from ${instance}...`);
 
-      // Download the stream
       await new Promise((resolve, reject) => {
         const download = (dlUrl) => {
           const mod = dlUrl.startsWith("https") ? https : http;
-          mod.get(dlUrl, { headers: { "User-Agent": client.ua }, timeout: 300000 }, (res) => {
+          mod.get(dlUrl, { timeout: 300000, headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
               return download(res.headers.location);
             }
@@ -2664,111 +2637,122 @@ async function downloadYouTubeDirect(videoId) {
             res.pipe(ws);
             ws.on("finish", () => { ws.close(); resolve(); });
             ws.on("error", reject);
-          }).on("error", reject).on("timeout", () => reject(new Error("Download timeout")));
+          }).on("error", reject);
         };
         download(best.url);
       });
 
       if (fs.existsSync(dest) && fs.statSync(dest).size > 50000) {
-        console.log(`✅ YouTube direct download success (${client.name}, ${best.height}p)`);
+        console.log(`✅ Invidious download success (${instance})`);
         return dest;
       }
       try { fs.unlinkSync(dest); } catch {}
-      lastErr = new Error(`${client.name}: Download produced empty file`);
+      lastErr = new Error("Download produced empty file");
     } catch (err) {
       lastErr = err;
-      console.error(`YouTube ${client.name} failed:`, err.message);
+      console.error(`Invidious ${instance} failed:`, err.message);
       try { fs.unlinkSync(dest); } catch {}
     }
   }
 
-  throw lastErr || new Error("All YouTube download methods failed");
+  throw lastErr || new Error("All Invidious instances failed");
 }
 
 // Download via Cobalt API (backup for non-YouTube platforms)
 async function downloadWithCobalt(url) {
   const dest = path.join(TEMP_DIR, `${Date.now()}_cobalt.mp4`);
 
-  // List of public Cobalt API instances to try
+  // Public Cobalt API instances
   const cobaltInstances = [
     "https://api.cobalt.tools",
-    "https://cobalt-api.kwiatekmiki.com",
-    "https://cobalt.api.timelessnesses.me",
+    "https://cobalt-api.ayo.tf",
+    "https://cobalt.canine.tools",
   ];
+
+  function cobaltPost(apiBase, body) {
+    return new Promise((resolve, reject) => {
+      const postData = JSON.stringify(body);
+      const urlObj = new URL(apiBase);
+      const req = https.request({
+        hostname: urlObj.hostname,
+        port: urlObj.port || 443,
+        path: "/",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "Content-Length": Buffer.byteLength(postData),
+        },
+        timeout: 30000,
+      }, (res) => {
+        let data = "";
+        res.on("data", (chunk) => { data += chunk; });
+        res.on("end", () => {
+          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+          catch { reject(new Error(`Bad response: ${data.slice(0, 200)}`)); }
+        });
+      });
+      req.on("error", reject);
+      req.on("timeout", () => { req.destroy(); reject(new Error("timeout")); });
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  function downloadFile(dlUrl, destPath) {
+    return new Promise((resolve, reject) => {
+      const follow = (u) => {
+        const mod = u.startsWith("https") ? https : http;
+        mod.get(u, { timeout: 300000, headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) return follow(res.headers.location);
+          if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+          const ws = fs.createWriteStream(destPath);
+          res.pipe(ws);
+          ws.on("finish", () => { ws.close(); resolve(); });
+          ws.on("error", reject);
+        }).on("error", reject);
+      };
+      follow(dlUrl);
+    });
+  }
 
   let lastErr = null;
   for (const apiBase of cobaltInstances) {
     try {
       console.log(`🔗 Trying Cobalt: ${apiBase}`);
-      const response = await new Promise((resolve, reject) => {
-        const postData = JSON.stringify({
-          url: url,
-          videoQuality: "1080",
-          filenameStyle: "basic",
-        });
-        const urlObj = new URL(`${apiBase}/`);
-        const reqOpts = {
-          hostname: urlObj.hostname,
-          port: urlObj.port || 443,
-          path: "/",
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Content-Length": Buffer.byteLength(postData),
-          },
-          timeout: 30000,
-        };
-        const req = https.request(reqOpts, (res) => {
-          let data = "";
-          res.on("data", (chunk) => { data += chunk; });
-          res.on("end", () => {
-            try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
-            catch { reject(new Error(`Invalid JSON from Cobalt: ${data.slice(0, 200)}`)); }
-          });
-        });
-        req.on("error", reject);
-        req.on("timeout", () => { req.destroy(); reject(new Error("Cobalt API timeout")); });
-        req.write(postData);
-        req.end();
-      });
+      const resp = await cobaltPost(apiBase, { url, videoQuality: "1080", filenameStyle: "basic" });
 
-      if (response.data.status === "error") {
-        lastErr = new Error(response.data.error?.code || "Cobalt returned error");
+      console.log(`Cobalt ${apiBase} response: status=${resp.status}, body.status=${resp.body?.status}`);
+
+      // Handle different response formats
+      const dlUrl = resp.body?.url || resp.body?.data?.url;
+      const status = resp.body?.status;
+
+      if (status === "error") {
+        lastErr = new Error(`Cobalt: ${resp.body?.error?.code || JSON.stringify(resp.body?.error || "unknown error")}`);
         continue;
       }
 
-      // Get the download URL
-      const dlUrl = response.data.url;
-      if (!dlUrl) {
-        lastErr = new Error("No download URL from Cobalt");
+      if (status === "redirect" || status === "stream") {
+        if (!dlUrl) { lastErr = new Error("No URL in response"); continue; }
+        await downloadFile(dlUrl, dest);
+      } else if (status === "tunnel" || status === "picker") {
+        const tunnelUrl = dlUrl || resp.body?.data?.[0]?.url || resp.body?.picker?.[0]?.url;
+        if (!tunnelUrl) { lastErr = new Error("No tunnel/picker URL"); continue; }
+        await downloadFile(tunnelUrl, dest);
+      } else if (dlUrl) {
+        await downloadFile(dlUrl, dest);
+      } else {
+        lastErr = new Error(`Unknown Cobalt status: ${status}, keys: ${Object.keys(resp.body || {})}`);
         continue;
       }
-
-      // Download the file
-      await new Promise((resolve, reject) => {
-        const download = (downloadUrl) => {
-          const mod = downloadUrl.startsWith("https") ? https : http;
-          mod.get(downloadUrl, { timeout: 300000 }, (res) => {
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-              return download(res.headers.location);
-            }
-            if (res.statusCode !== 200) return reject(new Error(`Download HTTP ${res.statusCode}`));
-            const ws = fs.createWriteStream(dest);
-            res.pipe(ws);
-            ws.on("finish", () => { ws.close(); resolve(); });
-            ws.on("error", reject);
-          }).on("error", reject);
-        };
-        download(dlUrl);
-      });
 
       if (fs.existsSync(dest) && fs.statSync(dest).size > 10000) {
         console.log(`✅ Cobalt download success from ${apiBase}`);
         return dest;
       }
       try { fs.unlinkSync(dest); } catch {}
-      lastErr = new Error("Cobalt download produced empty file");
+      lastErr = new Error("Download produced empty file");
     } catch (err) {
       lastErr = err;
       console.error(`Cobalt ${apiBase} failed:`, err.message);
@@ -2783,12 +2767,13 @@ async function downloadWithYtdlpOnly(url, chatId) {
   const basename = `${Date.now()}_${chatId}`;
   const dest = path.join(TEMP_DIR, `${basename}.mp4`);
 
+  // Download ANY available format — no format restrictions at all
   const args = [
     url,
     "-o", path.join(TEMP_DIR, `${basename}.%(ext)s`),
     "--no-check-certificates",
     "--no-warnings",
-    "--merge-output-format", "mp4",
+    // No format flags, no merge-output-format — just get whatever is available
   ];
 
   const cookiesPath = path.join(__dirname, "cookies.txt");
@@ -2809,16 +2794,44 @@ async function downloadWithYtdlpOnly(url, chatId) {
     });
   });
 
+  // Find the downloaded file (could be .mp4, .webm, .mkv, etc)
   if (fs.existsSync(dest)) return dest;
 
   const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(basename));
   if (files.length > 0) {
     const actual = path.join(TEMP_DIR, files[0]);
+    // If not mp4, convert with ffmpeg
+    if (!actual.endsWith(".mp4")) {
+      await new Promise((resolve, reject) => {
+        ffmpeg(actual).output(dest)
+          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+          .on("end", () => { try { fs.unlinkSync(actual); } catch {} resolve(); })
+          .on("error", reject).run();
+      });
+      return dest;
+    }
     if (actual !== dest) fs.renameSync(actual, dest);
     return dest;
   }
 
-  throw new Error("yt-dlp download failed — no output file found");
+  // Check for partial files too
+  const allFiles = fs.readdirSync(TEMP_DIR).filter(f => f.includes(String(chatId)));
+  if (allFiles.length > 0) {
+    const actual = path.join(TEMP_DIR, allFiles[allFiles.length - 1]);
+    if (!actual.endsWith(".mp4")) {
+      await new Promise((resolve, reject) => {
+        ffmpeg(actual).output(dest)
+          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+          .on("end", () => { try { fs.unlinkSync(actual); } catch {} resolve(); })
+          .on("error", reject).run();
+      });
+      return dest;
+    }
+    if (actual !== dest) fs.renameSync(actual, dest);
+    return dest;
+  }
+
+  throw new Error("yt-dlp produced no output file");
 }
 
 function downloadFromUrl(url, chatId) {
