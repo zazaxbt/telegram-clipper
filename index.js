@@ -62,6 +62,8 @@ const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
       { command: 'loop', description: '🔁 Loop video N times' },
       { command: 'thumbnail', description: '🖼️ Extract thumbnail' },
       { command: 'merge', description: '🔗 Merge multiple videos' },
+      { command: 'autozoom', description: '🔍 Auto-zoom on audio peaks' },
+      { command: 'broll', description: '🎬 Insert stock B-roll footage' },
       { command: 'stop', description: '🛑 Cancel current operation' },
       { command: 'status', description: '📊 Show session info' },
     ]);
@@ -1232,7 +1234,9 @@ bot.onText(/^\/edit$/, (msg) => {
     `/pip - Picture-in-picture\n` +
     `/split - Split screen (2 videos)\n` +
     `/bgremove green - Green screen removal\n` +
-    `/thumbnail 5 - Extract frame at time\n\n` +
+    `/thumbnail 5 - Extract frame at time\n` +
+    `/autozoom - Auto-zoom on audio peaks\n` +
+    `/broll nature - Insert stock B-roll\n\n` +
     `*📦 Format:*\n` +
     `/gif - Convert to GIF\n` +
     `/compress - Reduce file size\n` +
@@ -2268,6 +2272,216 @@ bot.onText(/^\/thumbnail(?:\s+([\d:.]+))?$/, async (msg, match) => {
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
 
+// /autozoom - Subtle zoom on audio peaks for dynamic feel
+bot.onText(/^\/autozoom$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (isBlocked(msg)) return;
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+  try {
+    bot.sendMessage(chatId, "🔍 Analyzing audio peaks for auto-zoom...");
+    const peaks = await detectAudioPeaks(session.videoPath);
+    const duration = await getVideoDuration(session.videoPath);
+
+    // Build zoompan keyframes: zoom in at peak moments, out during quiet
+    // We create a sendcmd-style expression for the zoompan filter
+    // Map peaks to time ranges with subtle zoom (1.0 to 1.15)
+    const peakTimes = new Set();
+    const topPeaks = peaks.slice(0, 30); // Use top 30 peaks
+    for (const peak of topPeaks) {
+      // Mark 0.5s windows around each peak
+      const t = Math.floor(peak.time * 2) / 2; // round to nearest 0.5s
+      peakTimes.add(t);
+    }
+
+    // Build zoompan expression: zoom is 1.15 near peaks, 1.0 otherwise
+    // Use smooth interpolation with zoompan filter
+    // zoompan with expression-based zoom that reacts to time
+    const fps = 25;
+    const totalFrames = Math.ceil(duration * fps);
+
+    // Build a zoom expression: check if current time is near any peak
+    // For simplicity and FFmpeg compatibility, use a single zoompan with
+    // a smooth zoom expression based on frame number
+    let zoomExpr = "1";
+    if (topPeaks.length > 0) {
+      // Create a smooth zoom expression using multiple if conditions
+      // Each peak contributes a gaussian-like bump: 0.15 * exp(-((t-peak)^2) / 0.25)
+      // We approximate with linear ramps for FFmpeg compatibility
+      const peakExprs = topPeaks.slice(0, 15).map(p => {
+        const peakFrame = Math.round(p.time * fps);
+        // Smooth bump: zoom += 0.15 when within ~12 frames (0.5s) of peak
+        return `0.15*max(0, 1-abs(on-${peakFrame})/12)`;
+      });
+      zoomExpr = `min(1.15, 1 + ${peakExprs.join(" + ")})`;
+    }
+
+    const outPath = path.join(TEMP_DIR, `autozoom_${chatId}.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).output(outPath)
+        .outputOptions([
+          "-vf", `zoompan=z='${zoomExpr}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080:fps=${fps}`,
+          "-c:a", "copy",
+          "-preset", "ultrafast",
+          "-shortest"
+        ])
+        .on("end", resolve).on("error", reject).run();
+    });
+    await sendVideoSmart(chatId, outPath, { caption: `🔍 Auto-zoom applied (${topPeaks.length} peak moments)` });
+    fs.unlinkSync(outPath);
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
+// /broll - Insert stock footage B-roll from Pexels
+bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = sessions[chatId];
+  if (isBlocked(msg)) return;
+  if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
+
+  const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
+  if (!PEXELS_API_KEY) {
+    return bot.sendMessage(chatId, "❌ PEXELS_API_KEY not configured.\n\nGet a free API key at https://www.pexels.com/api/ and add it to your .env file.");
+  }
+
+  const query = match[1] ? match[1].trim() : null;
+  if (!query) {
+    return bot.sendMessage(chatId, "Usage: /broll <search query>\n\nExamples:\n/broll nature\n/broll technology\n/broll city night\n/broll ocean waves");
+  }
+
+  try {
+    bot.sendMessage(chatId, `🎬 Searching Pexels for "${query}" B-roll...`);
+
+    // Search Pexels for stock footage
+    const searchUrl = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=5`;
+    const pexelsData = await new Promise((resolve, reject) => {
+      const reqUrl = new URL(searchUrl);
+      const options = {
+        hostname: reqUrl.hostname,
+        path: reqUrl.pathname + reqUrl.search,
+        method: "GET",
+        headers: { "Authorization": PEXELS_API_KEY }
+      };
+      const req = https.request(options, (res) => {
+        let body = "";
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => {
+          try { resolve(JSON.parse(body)); } catch (e) { reject(new Error("Invalid Pexels response")); }
+        });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    if (!pexelsData.videos || pexelsData.videos.length === 0) {
+      return bot.sendMessage(chatId, `❌ No stock footage found for "${query}". Try a different search term.`);
+    }
+
+    // Pick the first video with a usable file
+    let downloadUrl = null;
+    for (const video of pexelsData.videos) {
+      if (video.video_files && video.video_files.length > 0) {
+        // Prefer HD quality, reasonable file size
+        const sorted = [...video.video_files]
+          .filter(f => f.width && f.width >= 720)
+          .sort((a, b) => (a.width || 0) - (b.width || 0));
+        const chosen = sorted[0] || video.video_files[0];
+        if (chosen && chosen.link) {
+          downloadUrl = chosen.link;
+          break;
+        }
+      }
+    }
+
+    if (!downloadUrl) {
+      return bot.sendMessage(chatId, "❌ Could not find a downloadable video file from Pexels.");
+    }
+
+    bot.sendMessage(chatId, "📥 Downloading B-roll clip...");
+
+    // Download the B-roll clip
+    const brollPath = path.join(TEMP_DIR, `broll_${chatId}_${Date.now()}.mp4`);
+    await new Promise((resolve, reject) => {
+      const downloadFile = (url) => {
+        const proto = url.startsWith("https") ? https : http;
+        proto.get(url, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            downloadFile(res.headers.location);
+            return;
+          }
+          const ws = fs.createWriteStream(brollPath);
+          res.pipe(ws);
+          ws.on("finish", () => { ws.close(); resolve(); });
+        }).on("error", reject);
+      };
+      downloadFile(downloadUrl);
+    });
+
+    bot.sendMessage(chatId, "🎬 Overlaying B-roll as insert cutaway...");
+
+    // Detect a quiet moment in the main video for the B-roll insert
+    const mainDuration = await getVideoDuration(session.videoPath);
+    const brollDuration = await getVideoDuration(brollPath);
+    const insertDuration = Math.min(brollDuration, 5, mainDuration * 0.3); // Max 5s or 30% of video
+
+    // Find a quiet moment using audio peaks
+    let insertTime = mainDuration * 0.3; // Default: 30% into the video
+    try {
+      const peaks = await detectAudioPeaks(session.videoPath);
+      if (peaks.length > 0) {
+        // Find the quietest 5-second window
+        const peaksByTime = peaks.sort((a, b) => a.time - b.time);
+        let quietestTime = 0;
+        let lowestEnergy = Infinity;
+        for (let t = 1; t < mainDuration - insertDuration - 1; t += 0.5) {
+          const energy = peaksByTime
+            .filter(p => p.time >= t && p.time <= t + insertDuration)
+            .reduce((sum, p) => sum + (p.level + 50), 0);
+          if (energy < lowestEnergy) {
+            lowestEnergy = energy;
+            quietestTime = t;
+          }
+        }
+        if (quietestTime > 0) insertTime = quietestTime;
+      }
+    } catch {}
+
+    // Use FFmpeg to insert B-roll as full-screen cutaway at the quiet moment
+    const outPath = path.join(TEMP_DIR, `broll_out_${chatId}.mp4`);
+    const insertEnd = Math.min(insertTime + insertDuration, mainDuration);
+
+    // Scale B-roll to match main video, overlay it during the insert window
+    // Use overlay filter with enable expression for timed insert
+    await new Promise((resolve, reject) => {
+      const proc = spawn("ffmpeg", [
+        "-i", session.videoPath,
+        "-i", brollPath,
+        "-filter_complex",
+        `[1:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS[broll];` +
+        `[0:v][broll]overlay=0:0:enable='between(t,${insertTime.toFixed(2)},${insertEnd.toFixed(2)})'[outv]`,
+        "-map", "[outv]",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-c:a", "copy",
+        "-preset", "ultrafast",
+        "-shortest",
+        "-y", outPath
+      ], { stdio: ["pipe", "pipe", "pipe"] });
+
+      proc.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`FFmpeg exited with code ${code}`));
+      });
+      proc.on("error", reject);
+    });
+
+    await sendVideoSmart(chatId, outPath, {
+      caption: `🎬 B-roll "${query}" inserted at ${formatTime(insertTime)} (${insertDuration.toFixed(1)}s cutaway)`
+    });
+    [brollPath, outPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+});
+
 // Helper: Format ASS subtitle timestamp
 function formatASSTime(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -2389,7 +2603,8 @@ async function autoCaptionClip(videoPath, outPath) {
     return 0;
   }
 
-  // Build ASS subtitle file (CapCut style — bold white text, black outline, bottom center)
+  // Build ASS subtitle file — word-by-word highlight (TikTok/CapCut viral style)
+  // Each word gets its own Dialogue line, displayed one at a time, big and centered
   const assPath = videoPath.replace(/\.mp4$/, '_subs.ass');
   let assContent = `[Script Info]
 ScriptType: v4.00+
@@ -2398,16 +2613,29 @@ PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,60,1
+Style: Word,Arial,90,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,0,2,10,10,80,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
 
   for (const chunk of chunks) {
-    const startTime = formatASSTime(chunk.timestamp[0]);
-    const endTime = formatASSTime(chunk.timestamp[1]);
-    const text = chunk.text.replace(/\n/g, "\\N").toUpperCase();
-    assContent += `Dialogue: 0,${startTime},${endTime},Default,,0,0,0,,${text}\n`;
+    const segStart = chunk.timestamp[0];
+    const segEnd = chunk.timestamp[1];
+    const segDuration = segEnd - segStart;
+    const text = chunk.text.trim();
+    const words = text.split(/\s+/).filter(w => w.length > 0);
+    if (words.length === 0) continue;
+
+    const wordDuration = segDuration / words.length;
+
+    for (let i = 0; i < words.length; i++) {
+      const wordStart = segStart + i * wordDuration;
+      const wordEnd = segStart + (i + 1) * wordDuration;
+      const startTime = formatASSTime(wordStart);
+      const endTime = formatASSTime(wordEnd);
+      const word = words[i].toUpperCase().replace(/[{}\\]/g, "");
+      assContent += `Dialogue: 0,${startTime},${endTime},Word,,0,0,0,,${word}\n`;
+    }
   }
   fs.writeFileSync(assPath, assContent);
 
