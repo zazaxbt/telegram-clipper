@@ -2426,9 +2426,9 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
     bot.sendMessage(chatId, `🎬 Processing B-roll insert (${insertDuration.toFixed(1)}s at ${formatTime(insertTime)})...\nMain video: ${mainDuration.toFixed(0)}s`);
 
     const outPath = path.join(TEMP_DIR, `broll_out_${chatId}.mp4`);
-    const part1 = path.join(TEMP_DIR, `broll_p1_${chatId}.ts`);
-    const part2 = path.join(TEMP_DIR, `broll_p2_${chatId}.ts`);
-    const part3 = path.join(TEMP_DIR, `broll_p3_${chatId}.ts`);
+    const part1 = path.join(TEMP_DIR, `broll_p1_${chatId}.mp4`);
+    const part2 = path.join(TEMP_DIR, `broll_p2_${chatId}.mp4`);
+    const part3 = path.join(TEMP_DIR, `broll_p3_${chatId}.mp4`);
 
     // Probe main video for resolution & audio info
     const probeInfo = await new Promise((res, rej) => {
@@ -2470,9 +2470,9 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
     bot.sendMessage(chatId, "✂️ Step 1/3: Splitting main video...");
     await Promise.all([
       spawnFFmpeg(["-i", session.videoPath, "-t", String(insertTime),
-        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part1], "Part1 cut"),
+        "-c", "copy", "-avoid_negative_ts", "make_zero", part1], "Part1 cut"),
       spawnFFmpeg(["-i", session.videoPath, "-ss", String(insertEnd),
-        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part3], "Part3 cut"),
+        "-c", "copy", "-avoid_negative_ts", "make_zero", part3], "Part3 cut"),
     ]);
 
     // Step 2: Re-encode only the short B-roll clip
@@ -2487,29 +2487,29 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
       brollArgs = ["-i", brollPath, "-t", String(insertDuration),
         "-vf", `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
         "-r", fps, "-c:v", "libx264", "-preset", "ultrafast",
-        "-c:a", "aac", "-ar", ar, "-ac", "2",
-        "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part2];
+        "-c:a", "aac", "-ar", ar, "-ac", "2", part2];
     } else {
       brollArgs = ["-f", "lavfi", "-i", `anullsrc=r=${ar}:cl=stereo`,
         "-i", brollPath, "-t", String(insertDuration),
         "-vf", `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
         "-r", fps, "-map", "1:v", "-map", "0:a", "-shortest",
-        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
-        "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part2];
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", part2];
     }
     await spawnFFmpeg(brollArgs, "B-roll encode");
 
-    // Step 3: Concat all parts
+    // Step 3: Concat all parts using concat demuxer (file list)
     bot.sendMessage(chatId, "🔗 Step 3/3: Joining segments...");
+    const listPath = path.join(TEMP_DIR, `broll_list_${chatId}.txt`);
+    fs.writeFileSync(listPath, `file '${part1}'\nfile '${part2}'\nfile '${part3}'`);
     await spawnFFmpeg([
-      "-i", `concat:${part1}|${part2}|${part3}`,
+      "-f", "concat", "-safe", "0", "-i", listPath,
       "-c", "copy", "-movflags", "+faststart", outPath
     ], "Concat");
 
     await sendVideoSmart(chatId, outPath, {
       caption: `🎬 B-roll "${query}" inserted at ${formatTime(insertTime)} (${insertDuration.toFixed(1)}s cutaway)`
     });
-    [brollPath, outPath, part1, part2, part3].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    [brollPath, outPath, part1, part2, part3, listPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
 
