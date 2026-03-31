@@ -3,9 +3,8 @@ FROM node:20-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip curl unzip fontconfig && \
     pip3 install --break-system-packages --no-cache-dir faster-whisper huggingface_hub yt-dlp && \
     mkdir -p /usr/share/fonts/truetype/montserrat && \
-    curl -fsSL -o /tmp/montserrat.zip "https://fonts.google.com/download?family=Montserrat" && \
-    unzip -o /tmp/montserrat.zip -d /usr/share/fonts/truetype/montserrat/ && \
-    rm /tmp/montserrat.zip && \
+    curl -fsSL -o /usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Bold.ttf" && \
+    curl -fsSL -o /usr/share/fonts/truetype/montserrat/Montserrat-Regular.ttf "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Regular.ttf" && \
     fc-cache -fv && \
     apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
