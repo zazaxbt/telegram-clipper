@@ -424,7 +424,7 @@ bot.onText(/\/stop/, (msg) => {
 bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
   if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
-  if (String(chatId) !== ADMIN_ID) return bot.sendMessage(chatId, "Admin only.");
+  if (String(chatId) !== String(ADMIN_ID)) return bot.sendMessage(chatId, "Admin only.");
 
   const testUrl = match[1] || "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
   const ytId = extractYouTubeId(testUrl);
