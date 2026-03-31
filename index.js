@@ -2613,8 +2613,8 @@ async function autoCaptionClip(videoPath, outPath) {
     return 0;
   }
 
-  // Build ASS subtitle file — word-by-word highlight (TikTok/CapCut viral style)
-  // Each word gets its own Dialogue line, displayed one at a time, big and centered
+  // Build ASS subtitle file — CapCut/Submagic style
+  // Show groups of 3-5 words at a time, highlight the active word in yellow
   const assPath = videoPath.replace(/\.mp4$/, '_subs.ass');
   let assContent = `[Script Info]
 ScriptType: v4.00+
@@ -2623,11 +2623,13 @@ PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Word,Arial,90,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,0,2,10,10,80,1
+Style: Caption,Montserrat,78,&H00FFFFFF,&H000000FF,&H00000000,&HAA000000,-1,0,0,0,100,100,2,0,1,4,2,2,40,40,70,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
 
+  // Group all words with their timestamps
+  const allWords = [];
   for (const chunk of chunks) {
     const segStart = chunk.timestamp[0];
     const segEnd = chunk.timestamp[1];
@@ -2635,16 +2637,42 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
     const text = chunk.text.trim();
     const words = text.split(/\s+/).filter(w => w.length > 0);
     if (words.length === 0) continue;
-
-    const wordDuration = segDuration / words.length;
-
+    const wordDur = segDuration / words.length;
     for (let i = 0; i < words.length; i++) {
-      const wordStart = segStart + i * wordDuration;
-      const wordEnd = segStart + (i + 1) * wordDuration;
-      const startTime = formatASSTime(wordStart);
-      const endTime = formatASSTime(wordEnd);
-      const word = words[i].toUpperCase().replace(/[{}\\]/g, "");
-      assContent += `Dialogue: 0,${startTime},${endTime},Word,,0,0,0,,${word}\n`;
+      allWords.push({
+        word: words[i].toUpperCase().replace(/[{}\\]/g, ""),
+        start: segStart + i * wordDur,
+        end: segStart + (i + 1) * wordDur,
+      });
+    }
+  }
+
+  // Group words into chunks of 4 for display
+  const WORDS_PER_GROUP = 4;
+  for (let g = 0; g < allWords.length; g += WORDS_PER_GROUP) {
+    const group = allWords.slice(g, g + WORDS_PER_GROUP);
+    const groupStart = group[0].start;
+    const groupEnd = group[group.length - 1].end;
+
+    // For each word in the group, show the full group but highlight the active word
+    for (let w = 0; w < group.length; w++) {
+      const wStart = formatASSTime(group[w].start);
+      const wEnd = formatASSTime(group[w].end);
+
+      // Build the line with highlight on active word
+      // Active word: yellow {\1c&H00FFFF&} (BGR format, so 00FFFF = yellow)
+      // Other words: white (default style)
+      let line = "";
+      for (let j = 0; j < group.length; j++) {
+        if (j === w) {
+          // Active word — yellow, slightly bigger
+          line += `{\\1c&H00FFFF&\\fscx110\\fscy110}${group[j].word}{\\1c&HFFFFFF&\\fscx100\\fscy100} `;
+        } else {
+          line += `${group[j].word} `;
+        }
+      }
+
+      assContent += `Dialogue: 0,${wStart},${wEnd},Caption,,0,0,0,,${line.trim()}\n`;
     }
   }
   fs.writeFileSync(assPath, assContent);

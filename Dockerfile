@@ -1,7 +1,8 @@
 FROM node:20-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip curl unzip && \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip curl unzip fonts-montserrat fontconfig && \
     pip3 install --break-system-packages --no-cache-dir faster-whisper huggingface_hub yt-dlp && \
+    fc-cache -fv && \
     apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 # Install deno — yt-dlp needs a JS runtime for YouTube's JS challenge
