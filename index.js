@@ -2423,66 +2423,76 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
     const brollDuration = await getVideoDuration(brollPath);
     const insertDuration = Math.min(brollDuration, 5, mainDuration * 0.3);
 
-    // Quick silence detection (15s timeout) to find a good insert point
-    let insertTime = mainDuration * 0.3;
-    try {
-      const silences = await new Promise((resolve, reject) => {
-        const found = [];
-        const proc = require("child_process").spawn("ffmpeg", [
-          "-i", session.videoPath, "-af", "silencedetect=noise=-30dB:d=0.3",
-          "-f", "null", "-"
-        ], { stdio: ["pipe", "pipe", "pipe"] });
-        const timer = setTimeout(() => { proc.kill(); resolve(found); }, 15000);
-        let buf = "";
-        proc.stderr.on("data", d => {
-          buf += d.toString();
-          const matches = buf.matchAll(/silence_start:\s*([\d.]+)/g);
-          for (const m of matches) found.push(parseFloat(m[1]));
-        });
-        proc.on("close", () => { clearTimeout(timer); resolve(found); });
-        proc.on("error", () => { clearTimeout(timer); resolve(found); });
-      });
-      // Pick a silence that's not too early or too late
-      const good = silences.filter(t => t > 1 && t < mainDuration - insertDuration - 1);
-      if (good.length > 0) insertTime = good[Math.floor(good.length / 2)];
-    } catch {}
-
+    // Insert at ~30% mark — skip heavy audio analysis entirely
+    const insertTime = Math.max(1, mainDuration * 0.3);
     const insertEnd = Math.min(insertTime + insertDuration, mainDuration);
-    const outPath = path.join(TEMP_DIR, `broll_out_${chatId}.mp4`);
 
-    // Single FFmpeg command: concat filter merges all 3 segments in one pass
-    await new Promise((resolve, reject) => {
-      const args = [
-        "-y",
-        "-i", session.videoPath,
-        "-i", brollPath,
-        "-filter_complex",
-        `[0:v]trim=0:${insertTime},setpts=PTS-STARTPTS,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[v0];` +
-        `[0:a]atrim=0:${insertTime},asetpts=PTS-STARTPTS[a0];` +
-        `[1:v]trim=0:${insertDuration},setpts=PTS-STARTPTS,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[v1];` +
-        `[1:a]atrim=0:${insertDuration},asetpts=PTS-STARTPTS[a1];` +
-        `[0:v]trim=${insertEnd}:${mainDuration},setpts=PTS-STARTPTS,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1[v2];` +
-        `[0:a]atrim=${insertEnd}:${mainDuration},asetpts=PTS-STARTPTS[a2];` +
-        `[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[outv][outa]`,
-        "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
-        "-movflags", "+faststart",
-        outPath
-      ];
-      const proc = require("child_process").spawn("ffmpeg", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const outPath = path.join(TEMP_DIR, `broll_out_${chatId}.mp4`);
+    const part1 = path.join(TEMP_DIR, `broll_p1_${chatId}.ts`);
+    const part2 = path.join(TEMP_DIR, `broll_p2_${chatId}.ts`);
+    const part3 = path.join(TEMP_DIR, `broll_p3_${chatId}.ts`);
+
+    // Probe main video to get resolution & audio info for B-roll encoding
+    const probeInfo = await new Promise((res, rej) => {
+      ffmpeg.ffprobe(session.videoPath, (err, meta) => err ? rej(err) : res(meta));
+    });
+    const vStream = probeInfo.streams.find(s => s.codec_type === "video");
+    const aStream = probeInfo.streams.find(s => s.codec_type === "audio");
+    const w = vStream?.width || 1280;
+    const h = vStream?.height || 720;
+    const fps = vStream?.r_frame_rate || "30";
+    const ar = aStream?.sample_rate || "44100";
+
+    // Step 1 & 3: Stream-copy main video parts to MPEG-TS (fast, no re-encode)
+    // Step 2: Re-encode only the short B-roll clip to match main video format
+    const spawnFFmpeg = (args) => new Promise((resolve, reject) => {
+      const proc = require("child_process").spawn("ffmpeg", ["-y", ...args], {
+        stdio: ["pipe", "pipe", "pipe"]
+      });
       let errBuf = "";
       proc.stderr.on("data", d => { errBuf += d.toString(); });
-      proc.on("close", code => {
-        if (code === 0) resolve();
-        else reject(new Error(`FFmpeg B-roll failed (code ${code}): ${errBuf.slice(-300)}`));
-      });
+      proc.on("close", code => code === 0 ? resolve() : reject(new Error(`FFmpeg failed: ${errBuf.slice(-300)}`)));
       proc.on("error", reject);
     });
+
+    // Cut parts 1 & 3 from main video with stream copy (instant)
+    await Promise.all([
+      spawnFFmpeg(["-i", session.videoPath, "-t", String(insertTime),
+        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part1]),
+      spawnFFmpeg(["-i", session.videoPath, "-ss", String(insertEnd),
+        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part3]),
+    ]);
+
+    // Re-encode only the short B-roll (5s max) to match main video
+    // Generate silent audio if B-roll has none
+    const brollProbe = await new Promise((res, rej) => {
+      ffmpeg.ffprobe(brollPath, (err, meta) => err ? rej(err) : res(meta));
+    });
+    const brollHasAudio = brollProbe.streams.some(s => s.codec_type === "audio");
+
+    const brollArgs = ["-i", brollPath, "-t", String(insertDuration),
+      "-vf", `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+      "-r", fps, "-c:v", "libx264", "-preset", "ultrafast"];
+    if (brollHasAudio) {
+      brollArgs.push("-c:a", "aac", "-ar", ar, "-ac", "2");
+    } else {
+      // Generate silent audio to match main video
+      brollArgs.push("-f", "lavfi", "-i", `anullsrc=r=${ar}:cl=stereo`,
+        "-shortest", "-c:a", "aac");
+    }
+    brollArgs.push("-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part2);
+    await spawnFFmpeg(brollArgs);
+
+    // Concat using MPEG-TS concat protocol (no re-encode, instant)
+    await spawnFFmpeg([
+      "-i", `concat:${part1}|${part2}|${part3}`,
+      "-c", "copy", "-movflags", "+faststart", outPath
+    ]);
 
     await sendVideoSmart(chatId, outPath, {
       caption: `🎬 B-roll "${query}" inserted at ${formatTime(insertTime)} (${insertDuration.toFixed(1)}s cutaway)`
     });
-    [brollPath, outPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    [brollPath, outPath, part1, part2, part3].forEach(f => { try { fs.unlinkSync(f); } catch {} });
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
 
