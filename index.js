@@ -2482,16 +2482,21 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
     });
     const brollHasAudio = brollProbe.streams.some(s => s.codec_type === "audio");
 
-    const brollArgs = ["-i", brollPath, "-t", String(insertDuration),
-      "-vf", `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
-      "-r", fps, "-c:v", "libx264", "-preset", "ultrafast"];
+    let brollArgs;
     if (brollHasAudio) {
-      brollArgs.push("-c:a", "aac", "-ar", ar, "-ac", "2");
+      brollArgs = ["-i", brollPath, "-t", String(insertDuration),
+        "-vf", `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+        "-r", fps, "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:a", "aac", "-ar", ar, "-ac", "2",
+        "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part2];
     } else {
-      brollArgs.push("-f", "lavfi", "-i", `anullsrc=r=${ar}:cl=stereo`,
-        "-shortest", "-c:a", "aac");
+      brollArgs = ["-f", "lavfi", "-i", `anullsrc=r=${ar}:cl=stereo`,
+        "-i", brollPath, "-t", String(insertDuration),
+        "-vf", `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+        "-r", fps, "-map", "1:v", "-map", "0:a", "-shortest",
+        "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+        "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part2];
     }
-    brollArgs.push("-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part2);
     await spawnFFmpeg(brollArgs, "B-roll encode");
 
     // Step 3: Concat all parts
