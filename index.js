@@ -501,36 +501,51 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
     const cookiesSize = cookiesExist ? fs.statSync(cookiesPath).size : 0;
     report += `Cookies: ${cookiesExist ? `yes (${cookiesSize} bytes)` : "NOT FOUND"}\n`;
 
-    // List available formats WITH stderr to see the actual error
+    // Test different player clients
     if (ytId) {
-      await updateProgress(chatId, statusMsg.message_id, report + "\n▶️ Listing formats...");
-      try {
-        const fmtArgs = ["--list-formats", testUrl, "--no-warnings", "-v"];
-        if (cookiesExist) fmtArgs.push("--cookies", cookiesPath);
-        const { stdout: fmtOut, stderr: fmtErr } = await new Promise((resolve, reject) => {
-          const proc = spawn("yt-dlp", fmtArgs, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
-          let out = "", err = "";
-          proc.stdout.on("data", (d) => { out += d; });
-          proc.stderr.on("data", (d) => { err += d; });
-          proc.on("close", () => resolve({ stdout: out, stderr: err }));
-          proc.on("error", reject);
-          setTimeout(() => { proc.kill(); resolve({ stdout: "timeout", stderr: "" }); }, 30000);
-        });
-        const lines = fmtOut.split("\n").filter(l => l.trim()).slice(0, 15);
-        report += `\n📋 Formats (${lines.length} lines):\n${lines.join("\n").slice(0, 600)}\n`;
-        // Show relevant stderr lines
-        const errLines = fmtErr.split("\n").filter(l => l.includes("ERROR") || l.includes("Sign in") || l.includes("bot") || l.includes("available") || l.includes("Extracting")).slice(0, 5);
-        if (errLines.length) report += `\n⚠️ yt-dlp stderr:\n${errLines.join("\n").slice(0, 400)}\n`;
-      } catch (e) {
-        report += `\n❌ Format list error: ${e.message}\n`;
+      const clientTests = [
+        { name: "web_creator", args: ["--extractor-args", "youtube:player_client=web_creator"] },
+        { name: "mweb", args: ["--extractor-args", "youtube:player_client=mweb"] },
+        { name: "default (no cookies)", args: [] },
+        { name: "default+cookies", args: cookiesExist ? ["--cookies", cookiesPath] : [] },
+      ];
+
+      for (const test of clientTests) {
+        await updateProgress(chatId, statusMsg.message_id, report + `\n▶️ Testing: ${test.name}...`);
+        try {
+          const fmtArgs = ["--list-formats", testUrl, "--no-warnings", "-v", ...test.args];
+          const { stdout: fmtOut, stderr: fmtErr } = await new Promise((resolve, reject) => {
+            const proc = spawn("yt-dlp", fmtArgs, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
+            let out = "", err = "";
+            proc.stdout.on("data", (d) => { out += d; });
+            proc.stderr.on("data", (d) => { err += d; });
+            proc.on("close", () => resolve({ stdout: out, stderr: err }));
+            proc.on("error", reject);
+            setTimeout(() => { proc.kill(); resolve({ stdout: "timeout", stderr: "" }); }, 45000);
+          });
+          const videoFormats = fmtOut.split("\n").filter(l => /\d{3,4}x\d{3,4}/.test(l) || l.includes("mp4") || l.includes("webm"));
+          const storyboardOnly = fmtOut.split("\n").filter(l => l.includes("mhtml")).length;
+          const totalFormats = fmtOut.split("\n").filter(l => /^\d/.test(l.trim())).length;
+          const errHits = fmtErr.split("\n").filter(l => l.includes("Sign in") || l.includes("bot") || l.includes("jsc")).slice(0, 2);
+
+          if (videoFormats.length > 0) {
+            report += `\n✅ ${test.name}: ${videoFormats.length} video formats!\n`;
+            report += videoFormats.slice(0, 3).join("\n").slice(0, 200) + "\n";
+            break; // Found working client!
+          } else {
+            report += `\n❌ ${test.name}: ${totalFormats} formats (${storyboardOnly} storyboard only)\n`;
+            if (errHits.length) report += `   ${errHits[0].slice(0, 100)}\n`;
+          }
+        } catch (e) {
+          report += `\n❌ ${test.name}: ${e.message.slice(0, 80)}\n`;
+        }
       }
 
-      // Try a direct download test (no format flags, just raw)
-      await updateProgress(chatId, statusMsg.message_id, report + "\n▶️ Test downloading...");
+      // Try actual download with web_creator client
+      await updateProgress(chatId, statusMsg.message_id, report + "\n▶️ Test downloading (web_creator)...");
       try {
         const testDest = path.join(TEMP_DIR, `debug_test_${Date.now()}.%(ext)s`);
-        const dlArgs = [testUrl, "-o", testDest, "--no-warnings"];
-        if (cookiesExist) dlArgs.push("--cookies", cookiesPath);
+        const dlArgs = [testUrl, "-o", testDest, "--no-warnings", "--extractor-args", "youtube:player_client=web_creator"];
         const { stderr: dlErr } = await new Promise((resolve, reject) => {
           const proc = spawn("yt-dlp", dlArgs, { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
           let err = "";
