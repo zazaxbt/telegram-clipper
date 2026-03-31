@@ -2446,39 +2446,49 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
       }
     } catch {}
 
-    // Use FFmpeg to insert B-roll as full-screen cutaway at the quiet moment
+    // Split main video into 3 parts: before, during (replaced by broll), after
     const outPath = path.join(TEMP_DIR, `broll_out_${chatId}.mp4`);
     const insertEnd = Math.min(insertTime + insertDuration, mainDuration);
+    const part1 = path.join(TEMP_DIR, `broll_p1_${chatId}.mp4`);
+    const part2 = path.join(TEMP_DIR, `broll_p2_${chatId}.mp4`);
+    const part3 = path.join(TEMP_DIR, `broll_p3_${chatId}.mp4`);
 
-    // Scale B-roll to match main video, overlay it during the insert window
-    // Use overlay filter with enable expression for timed insert
+    // Cut part 1 (before insert)
     await new Promise((resolve, reject) => {
-      const proc = spawn("ffmpeg", [
-        "-i", session.videoPath,
-        "-i", brollPath,
-        "-filter_complex",
-        `[1:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setpts=PTS-STARTPTS[broll];` +
-        `[0:v][broll]overlay=0:0:enable='between(t,${insertTime.toFixed(2)},${insertEnd.toFixed(2)})'[outv]`,
-        "-map", "[outv]",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-c:a", "copy",
-        "-preset", "ultrafast",
-        "-shortest",
-        "-y", outPath
-      ], { stdio: ["pipe", "pipe", "pipe"] });
+      ffmpeg(session.videoPath).setStartTime(0).setDuration(insertTime)
+        .output(part1).outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
 
-      proc.on("close", (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`FFmpeg exited with code ${code}`));
-      });
-      proc.on("error", reject);
+    // Cut broll to match duration, scale to match main video resolution
+    await new Promise((resolve, reject) => {
+      ffmpeg(brollPath).setStartTime(0).setDuration(insertDuration)
+        .output(part2).outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast",
+          "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+          "-ar", "44100", "-ac", "2"])
+        .on("end", resolve).on("error", reject).run();
+    });
+
+    // Cut part 3 (after insert)
+    await new Promise((resolve, reject) => {
+      ffmpeg(session.videoPath).setStartTime(insertEnd)
+        .output(part3).outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+        .on("end", resolve).on("error", reject).run();
+    });
+
+    // Concat all 3 parts
+    const listPath = path.join(TEMP_DIR, `broll_list_${chatId}.txt`);
+    fs.writeFileSync(listPath, `file '${part1}'\nfile '${part2}'\nfile '${part3}'`);
+    await new Promise((resolve, reject) => {
+      ffmpeg().input(listPath).inputOptions(["-f", "concat", "-safe", "0"])
+        .output(outPath).outputOptions(["-c", "copy"])
+        .on("end", resolve).on("error", reject).run();
     });
 
     await sendVideoSmart(chatId, outPath, {
       caption: `🎬 B-roll "${query}" inserted at ${formatTime(insertTime)} (${insertDuration.toFixed(1)}s cutaway)`
     });
-    [brollPath, outPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
+    [brollPath, outPath, part1, part2, part3, listPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
   } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
 
