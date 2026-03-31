@@ -2417,22 +2417,20 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
       downloadFile(downloadUrl);
     });
 
-    bot.sendMessage(chatId, "🎬 Overlaying B-roll as insert cutaway...");
-
     const mainDuration = await getVideoDuration(session.videoPath);
     const brollDuration = await getVideoDuration(brollPath);
     const insertDuration = Math.min(brollDuration, 5, mainDuration * 0.3);
-
-    // Insert at ~30% mark — skip heavy audio analysis entirely
     const insertTime = Math.max(1, mainDuration * 0.3);
     const insertEnd = Math.min(insertTime + insertDuration, mainDuration);
+
+    bot.sendMessage(chatId, `🎬 Processing B-roll insert (${insertDuration.toFixed(1)}s at ${formatTime(insertTime)})...\nMain video: ${mainDuration.toFixed(0)}s`);
 
     const outPath = path.join(TEMP_DIR, `broll_out_${chatId}.mp4`);
     const part1 = path.join(TEMP_DIR, `broll_p1_${chatId}.ts`);
     const part2 = path.join(TEMP_DIR, `broll_p2_${chatId}.ts`);
     const part3 = path.join(TEMP_DIR, `broll_p3_${chatId}.ts`);
 
-    // Probe main video to get resolution & audio info for B-roll encoding
+    // Probe main video for resolution & audio info
     const probeInfo = await new Promise((res, rej) => {
       ffmpeg.ffprobe(session.videoPath, (err, meta) => err ? rej(err) : res(meta));
     });
@@ -2443,28 +2441,42 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
     const fps = vStream?.r_frame_rate || "30";
     const ar = aStream?.sample_rate || "44100";
 
-    // Step 1 & 3: Stream-copy main video parts to MPEG-TS (fast, no re-encode)
-    // Step 2: Re-encode only the short B-roll clip to match main video format
-    const spawnFFmpeg = (args) => new Promise((resolve, reject) => {
+    // FFmpeg runner with 90s timeout and progress reporting
+    const spawnFFmpeg = (args, label) => new Promise((resolve, reject) => {
       const proc = require("child_process").spawn("ffmpeg", ["-y", ...args], {
         stdio: ["pipe", "pipe", "pipe"]
       });
       let errBuf = "";
-      proc.stderr.on("data", d => { errBuf += d.toString(); });
-      proc.on("close", code => code === 0 ? resolve() : reject(new Error(`FFmpeg failed: ${errBuf.slice(-300)}`)));
-      proc.on("error", reject);
+      let lastProgress = "";
+      const timeout = setTimeout(() => {
+        proc.kill("SIGKILL");
+        reject(new Error(`${label} timed out after 90s. Last progress: ${lastProgress || "none"}`));
+      }, 90000);
+      proc.stderr.on("data", d => {
+        errBuf += d.toString();
+        // Extract progress info
+        const timeMatch = d.toString().match(/time=(\d+:\d+:\d+\.\d+)/);
+        if (timeMatch) lastProgress = timeMatch[1];
+      });
+      proc.on("close", code => {
+        clearTimeout(timeout);
+        if (code === 0) resolve();
+        else reject(new Error(`${label} failed (code ${code}): ${errBuf.slice(-300)}`));
+      });
+      proc.on("error", err => { clearTimeout(timeout); reject(err); });
     });
 
-    // Cut parts 1 & 3 from main video with stream copy (instant)
+    // Step 1: Cut parts 1 & 3 with stream copy (should be instant)
+    bot.sendMessage(chatId, "✂️ Step 1/3: Splitting main video...");
     await Promise.all([
       spawnFFmpeg(["-i", session.videoPath, "-t", String(insertTime),
-        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part1]),
+        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part1], "Part1 cut"),
       spawnFFmpeg(["-i", session.videoPath, "-ss", String(insertEnd),
-        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part3]),
+        "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part3], "Part3 cut"),
     ]);
 
-    // Re-encode only the short B-roll (5s max) to match main video
-    // Generate silent audio if B-roll has none
+    // Step 2: Re-encode only the short B-roll clip
+    bot.sendMessage(chatId, "🎨 Step 2/3: Encoding B-roll clip...");
     const brollProbe = await new Promise((res, rej) => {
       ffmpeg.ffprobe(brollPath, (err, meta) => err ? rej(err) : res(meta));
     });
@@ -2476,18 +2488,18 @@ bot.onText(/^\/broll(?:\s+(.+))?$/, async (msg, match) => {
     if (brollHasAudio) {
       brollArgs.push("-c:a", "aac", "-ar", ar, "-ac", "2");
     } else {
-      // Generate silent audio to match main video
       brollArgs.push("-f", "lavfi", "-i", `anullsrc=r=${ar}:cl=stereo`,
         "-shortest", "-c:a", "aac");
     }
     brollArgs.push("-bsf:v", "h264_mp4toannexb", "-f", "mpegts", part2);
-    await spawnFFmpeg(brollArgs);
+    await spawnFFmpeg(brollArgs, "B-roll encode");
 
-    // Concat using MPEG-TS concat protocol (no re-encode, instant)
+    // Step 3: Concat all parts
+    bot.sendMessage(chatId, "🔗 Step 3/3: Joining segments...");
     await spawnFFmpeg([
       "-i", `concat:${part1}|${part2}|${part3}`,
       "-c", "copy", "-movflags", "+faststart", outPath
-    ]);
+    ], "Concat");
 
     await sendVideoSmart(chatId, outPath, {
       caption: `🎬 B-roll "${query}" inserted at ${formatTime(insertTime)} (${insertDuration.toFixed(1)}s cutaway)`
