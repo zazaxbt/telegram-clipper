@@ -1072,7 +1072,7 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
 
       bot.sendMessage(chatId, `📊 Chunk ${c + 1}/${totalChunks}: Transcribing with AI...`);
       try {
-        const chunks = await transcribeWithWhisper(wavPath);
+        const { chunks } = await transcribeWithWhisper(wavPath);
         // Adjust timestamps to absolute video time
         for (const chunk of chunks) {
           chunk.timestamp[0] += offset;
@@ -1786,9 +1786,9 @@ bot.onText(/^\/caption$/, async (msg) => {
           .on("end", resolve).on("error", reject).run();
       });
       try {
-        const result = await transcribeWithWhisper(wavPath);
-        for (const chunk of result) { chunk.timestamp[0] += offset; chunk.timestamp[1] += offset; }
-        chunks = chunks.concat(result);
+        const { chunks: wChunks } = await transcribeWithWhisper(wavPath);
+        for (const chunk of wChunks) { chunk.timestamp[0] += offset; chunk.timestamp[1] += offset; }
+        chunks = chunks.concat(wChunks);
       } catch (err) {
         await updateProgress(chatId, statusMsg.message_id, `⚠️ Chunk ${c + 1} failed: ${err.message}. Continuing...`);
       }
@@ -2600,21 +2600,51 @@ async function autoCaptionClip(videoPath, outPath) {
       .on("end", resolve).on("error", reject).run();
   });
 
-  let chunks;
+  let result;
   try {
-    chunks = await transcribeWithWhisper(wavPath);
+    result = await transcribeWithWhisper(wavPath);
   } finally {
     try { fs.unlinkSync(wavPath); } catch {}
   }
 
+  const { chunks, words } = result;
+
   if (!chunks || chunks.length === 0) {
-    // No speech detected — just copy the file as-is
     fs.copyFileSync(videoPath, outPath);
     return 0;
   }
 
-  // Build ASS subtitle file — CapCut/Submagic style
-  // Show groups of 3-5 words at a time, highlight the active word in yellow
+  // Build word list with precise timestamps
+  // Prefer word-level timestamps from Whisper; fall back to even-split
+  let allWords = [];
+  if (words && words.length > 0) {
+    for (const w of words) {
+      const clean = w.word.toUpperCase().replace(/[{}\\]/g, "").trim();
+      if (clean.length === 0) continue;
+      allWords.push({ word: clean, start: w.start, end: w.end });
+    }
+  } else {
+    for (const chunk of chunks) {
+      const segStart = chunk.timestamp[0];
+      const segEnd = chunk.timestamp[1];
+      const segDuration = segEnd - segStart;
+      const cWords = chunk.text.trim().split(/\s+/).filter(w => w.length > 0);
+      if (cWords.length === 0) continue;
+      const wordDur = segDuration / cWords.length;
+      for (let i = 0; i < cWords.length; i++) {
+        allWords.push({
+          word: cWords[i].toUpperCase().replace(/[{}\\]/g, ""),
+          start: segStart + i * wordDur,
+          end: segStart + (i + 1) * wordDur,
+        });
+      }
+    }
+  }
+
+  // --- Submagic-style ASS captions ---
+  // One word at a time, big bold white text, colored rounded background box
+  // BorderStyle=3 = opaque box, BackColour = box color
+  // Teal/green box (Submagic signature): &H00C8A030 (BGR for ~#30A0C8 teal)
   const assPath = videoPath.replace(/\.mp4$/, '_subs.ass');
   let assContent = `[Script Info]
 ScriptType: v4.00+
@@ -2623,58 +2653,31 @@ PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,Montserrat,78,&H00FFFFFF,&H000000FF,&H00000000,&HAA000000,-1,0,0,0,100,100,2,0,1,4,2,2,40,40,70,1
+Style: Word,Montserrat,90,&H00FFFFFF,&H000000FF,&H00000000,&H00E8A835,-1,0,0,0,100,100,3,0,3,20,0,2,40,40,80,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
 
-  // Group all words with their timestamps
-  const allWords = [];
-  for (const chunk of chunks) {
-    const segStart = chunk.timestamp[0];
-    const segEnd = chunk.timestamp[1];
-    const segDuration = segEnd - segStart;
-    const text = chunk.text.trim();
-    const words = text.split(/\s+/).filter(w => w.length > 0);
-    if (words.length === 0) continue;
-    const wordDur = segDuration / words.length;
-    for (let i = 0; i < words.length; i++) {
-      allWords.push({
-        word: words[i].toUpperCase().replace(/[{}\\]/g, ""),
-        start: segStart + i * wordDur,
-        end: segStart + (i + 1) * wordDur,
-      });
-    }
+  // Cycle through accent colors for variety (Submagic uses different colors per word)
+  const boxColors = [
+    "E8A835", // teal/cyan
+    "3C78E8", // orange-red
+    "32C850", // green
+    "5050E8", // red
+    "E85098", // pink/magenta
+    "50B4E8", // warm yellow
+  ];
+
+  for (let i = 0; i < allWords.length; i++) {
+    const w = allWords[i];
+    const start = formatASSTime(w.start);
+    const end = formatASSTime(w.end);
+    // Pick a color — cycle through palette
+    const color = boxColors[i % boxColors.length];
+    // Override box color per word with inline tag
+    assContent += `Dialogue: 0,${start},${end},Word,,0,0,0,,{\\3c&H${color}&\\4c&H${color}&}  ${w.word}  \n`;
   }
 
-  // Group words into chunks of 4 for display
-  const WORDS_PER_GROUP = 4;
-  for (let g = 0; g < allWords.length; g += WORDS_PER_GROUP) {
-    const group = allWords.slice(g, g + WORDS_PER_GROUP);
-    const groupStart = group[0].start;
-    const groupEnd = group[group.length - 1].end;
-
-    // For each word in the group, show the full group but highlight the active word
-    for (let w = 0; w < group.length; w++) {
-      const wStart = formatASSTime(group[w].start);
-      const wEnd = formatASSTime(group[w].end);
-
-      // Build the line with highlight on active word
-      // Active word: yellow {\1c&H00FFFF&} (BGR format, so 00FFFF = yellow)
-      // Other words: white (default style)
-      let line = "";
-      for (let j = 0; j < group.length; j++) {
-        if (j === w) {
-          // Active word — yellow, slightly bigger
-          line += `{\\1c&H00FFFF&\\fscx110\\fscy110}${group[j].word}{\\1c&HFFFFFF&\\fscx100\\fscy100} `;
-        } else {
-          line += `${group[j].word} `;
-        }
-      }
-
-      assContent += `Dialogue: 0,${wStart},${wEnd},Caption,,0,0,0,,${line.trim()}\n`;
-    }
-  }
   fs.writeFileSync(assPath, assContent);
 
   // Burn subtitles onto video
@@ -2788,8 +2791,10 @@ function transcribeWithWhisper(wavPath) {
     proc.on("close", (code, signal) => {
       // Try to parse stdout first regardless of exit code (warnings go to stderr)
       try {
-        const chunks = JSON.parse(stdout);
-        if (chunks.length > 0) return resolve(chunks);
+        const parsed = JSON.parse(stdout);
+        // New format: {chunks, words} — or legacy array format
+        if (parsed.chunks && parsed.chunks.length > 0) return resolve(parsed);
+        if (Array.isArray(parsed) && parsed.length > 0) return resolve({ chunks: parsed, words: [] });
       } catch {}
       // Detect OOM kill
       if (signal === 'SIGKILL' || code === 137) {

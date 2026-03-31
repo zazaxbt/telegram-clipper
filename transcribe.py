@@ -29,14 +29,24 @@ try:
         # Last resort — no download_root
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
-    segments, info = model.transcribe(audio_path)
+    segments, info = model.transcribe(audio_path, word_timestamps=True)
 
     chunks = []
+    words = []
     for segment in segments:
         chunks.append({
             "text": segment.text.strip(),
             "timestamp": [segment.start, segment.end]
         })
+        if segment.words:
+            for w in segment.words:
+                words.append({
+                    "word": w.word.strip(),
+                    "start": round(w.start, 3),
+                    "end": round(w.end, 3)
+                })
+
+    print(json.dumps({"chunks": chunks, "words": words}), flush=True)
 
     print(json.dumps(chunks), flush=True)
 
