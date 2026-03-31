@@ -439,16 +439,16 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
   const statusMsg = await bot.sendMessage(chatId, `🔍 Debug: ${testUrl}\nYT ID: ${ytId || "not YouTube"}\n\nTesting...`);
   let report = `🔍 Debug: ${testUrl}\nYT ID: ${ytId || "not YouTube"}\n\n`;
 
-  // Test Invidious
+  // Test YouTube.js
   if (ytId) {
     try {
-      await updateProgress(chatId, statusMsg.message_id, report + "▶️ Testing Invidious...");
+      await updateProgress(chatId, statusMsg.message_id, report + "▶️ Testing YouTube.js...");
       const dlPath = await downloadYouTubeDirect(ytId);
       const size = fs.existsSync(dlPath) ? (fs.statSync(dlPath).size / 1024 / 1024).toFixed(1) : 0;
-      report += `✅ Invidious: ${size}MB\n`;
+      report += `✅ YouTube.js: ${size}MB\n`;
       try { fs.unlinkSync(dlPath); } catch {}
     } catch (err) {
-      report += `❌ Invidious: ${err.message.slice(0, 200)}\n`;
+      report += `❌ YouTube.js: ${err.message.slice(0, 200)}\n`;
     }
   }
 
@@ -2658,89 +2658,93 @@ function extractYouTubeId(url) {
   return null;
 }
 
-// Download YouTube via Invidious public instances (free YouTube proxy, no auth needed)
+// Download YouTube via YouTube.js public instances (free YouTube proxy, no auth needed)
+// Download YouTube via YouTube.js (InnerTube client — handles JS challenges natively)
 async function downloadYouTubeDirect(videoId) {
   const dest = path.join(TEMP_DIR, `${Date.now()}_yt_${videoId}.mp4`);
 
-  function httpsGet(urlStr, timeout = 15000) {
-    return new Promise((resolve, reject) => {
-      const mod = urlStr.startsWith("https") ? https : http;
-      mod.get(urlStr, { timeout, headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+  // Dynamic import (youtubei.js is ESM)
+  const { Innertube } = await import("youtubei.js");
+  const yt = await Innertube.create();
+
+  console.log(`🎬 YouTube.js: fetching video info for ${videoId}...`);
+  const info = await yt.getBasicInfo(videoId);
+
+  if (info.playability_status?.status !== "OK") {
+    throw new Error(`Video not available: ${info.playability_status?.reason || "unknown"}`);
+  }
+
+  // Get streaming data
+  const streamingData = info.streaming_data;
+  if (!streamingData) {
+    throw new Error("No streaming data available");
+  }
+
+  const formats = [...(streamingData.formats || []), ...(streamingData.adaptive_formats || [])];
+
+  // Prefer: combined mp4 stream (has both video+audio), highest quality
+  let best = formats
+    .filter(f => f.url && f.mime_type?.includes("video/mp4") && f.has_audio && f.has_video)
+    .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+  // Fallback: any combined stream
+  if (!best) {
+    best = formats
+      .filter(f => f.url && f.has_audio && f.has_video)
+      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+  }
+
+  // Fallback: best video-only + download separately
+  if (!best) {
+    best = formats
+      .filter(f => f.url && f.has_video)
+      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+  }
+
+  if (!best || !best.url) {
+    const availableTypes = formats.map(f => `${f.mime_type} ${f.has_video ? 'V' : ''}${f.has_audio ? 'A' : ''} ${f.height || '?'}p url:${!!f.url}`).join(", ");
+    throw new Error(`No downloadable stream found. Available: ${availableTypes.slice(0, 200)}`);
+  }
+
+  console.log(`📥 YouTube.js: downloading ${best.height || "?"}p (${best.mime_type})...`);
+
+  // Download the stream
+  await new Promise((resolve, reject) => {
+    const download = (dlUrl) => {
+      const mod = dlUrl.startsWith("https") ? https : http;
+      mod.get(dlUrl, { timeout: 300000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          return httpsGet(res.headers.location, timeout).then(resolve).catch(reject);
+          return download(res.headers.location);
         }
-        let data = "";
-        res.on("data", (c) => { data += c; });
-        res.on("end", () => resolve({ status: res.statusCode, data }));
-      }).on("error", reject).on("timeout", function() { this.destroy(); reject(new Error("timeout")); });
-    });
-  }
+        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+        const ws = fs.createWriteStream(dest);
+        res.pipe(ws);
+        ws.on("finish", () => { ws.close(); resolve(); });
+        ws.on("error", reject);
+      }).on("error", reject);
+    };
+    download(best.url);
+  });
 
-  // Invidious instances that provide direct video URLs
-  const instances = [
-    "https://inv.nadeko.net",
-    "https://invidious.nerdvpn.de",
-    "https://invidious.jing.rocks",
-    "https://vid.puffyan.us",
-    "https://invidious.privacyredirect.com",
-  ];
+  if (fs.existsSync(dest) && fs.statSync(dest).size > 50000) {
+    console.log(`✅ YouTube.js download success (${best.height}p, ${(fs.statSync(dest).size / 1024 / 1024).toFixed(1)}MB)`);
 
-  let lastErr = null;
-  for (const instance of instances) {
-    try {
-      console.log(`🔗 Trying Invidious: ${instance}`);
-      const resp = await httpsGet(`${instance}/api/v1/videos/${videoId}?fields=formatStreams,adaptiveFormats`);
-      if (resp.status !== 200) { lastErr = new Error(`HTTP ${resp.status}`); continue; }
-
-      const data = JSON.parse(resp.data);
-      const streams = [...(data.formatStreams || []), ...(data.adaptiveFormats || [])];
-
-      // Prefer combined stream (video+audio) in mp4
-      let best = streams
-        .filter(s => s.url && s.type?.includes("video/mp4") && s.type?.includes("avc1") && s.encoding === "aac")
-        .sort((a, b) => (parseInt(b.resolution) || 0) - (parseInt(a.resolution) || 0))[0];
-
-      if (!best) {
-        best = streams
-          .filter(s => s.url && s.type?.includes("video"))
-          .sort((a, b) => (parseInt(b.resolution) || 0) - (parseInt(a.resolution) || 0))[0];
-      }
-
-      if (!best || !best.url) { lastErr = new Error("No streams found"); continue; }
-
-      console.log(`📥 Downloading ${best.resolution || "?"}p from ${instance}...`);
-
+    // If not mp4, convert
+    if (!best.mime_type?.includes("mp4")) {
+      const mp4Path = dest.replace(/\.[^.]+$/, ".mp4");
       await new Promise((resolve, reject) => {
-        const download = (dlUrl) => {
-          const mod = dlUrl.startsWith("https") ? https : http;
-          mod.get(dlUrl, { timeout: 300000, headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
-            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-              return download(res.headers.location);
-            }
-            if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-            const ws = fs.createWriteStream(dest);
-            res.pipe(ws);
-            ws.on("finish", () => { ws.close(); resolve(); });
-            ws.on("error", reject);
-          }).on("error", reject);
-        };
-        download(best.url);
+        ffmpeg(dest).output(mp4Path)
+          .outputOptions(["-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast"])
+          .on("end", () => { try { fs.unlinkSync(dest); } catch {} resolve(); })
+          .on("error", reject).run();
       });
-
-      if (fs.existsSync(dest) && fs.statSync(dest).size > 50000) {
-        console.log(`✅ Invidious download success (${instance})`);
-        return dest;
-      }
-      try { fs.unlinkSync(dest); } catch {}
-      lastErr = new Error("Download produced empty file");
-    } catch (err) {
-      lastErr = err;
-      console.error(`Invidious ${instance} failed:`, err.message);
-      try { fs.unlinkSync(dest); } catch {}
+      return mp4Path;
     }
+    return dest;
   }
 
-  throw lastErr || new Error("All Invidious instances failed");
+  try { fs.unlinkSync(dest); } catch {}
+  throw new Error("YouTube.js download produced empty file");
 }
 
 // Download via Cobalt API (backup for non-YouTube platforms)
