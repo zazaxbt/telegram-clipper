@@ -2896,69 +2896,77 @@ async function downloadYouTubeDirect(videoId) {
   const yt = await Innertube.create();
 
   console.log(`🎬 YouTube.js: fetching video info for ${videoId}...`);
-  const info = await yt.getBasicInfo(videoId);
+  // getInfo deciphers stream URLs (getBasicInfo does not)
+  const info = await yt.getInfo(videoId);
 
   if (info.playability_status?.status !== "OK") {
     throw new Error(`Video not available: ${info.playability_status?.reason || "unknown"}`);
   }
 
-  // Get streaming data
-  const streamingData = info.streaming_data;
-  if (!streamingData) {
-    throw new Error("No streaming data available");
+  // Use YouTube.js built-in download which handles deciphering
+  // Choose best quality with both video and audio
+  const format = info.chooseFormat({ type: "video+audio", quality: "best" });
+
+  if (!format) {
+    // Try adaptive formats separately
+    const videoFormat = info.chooseFormat({ type: "video", quality: "best" });
+    const audioFormat = info.chooseFormat({ type: "audio", quality: "best" });
+
+    if (videoFormat && audioFormat) {
+      // Download video and audio separately, merge with ffmpeg
+      console.log(`📥 YouTube.js: downloading video (${videoFormat.height}p) + audio separately...`);
+      const videoPath = dest.replace(".mp4", "_video.mp4");
+      const audioPath = dest.replace(".mp4", "_audio.mp4");
+
+      const videoStream = await yt.download(videoId, { type: "video", quality: "best" });
+      const videoWs = fs.createWriteStream(videoPath);
+      for await (const chunk of videoStream) { videoWs.write(chunk); }
+      videoWs.end();
+      await new Promise(r => videoWs.on("finish", r));
+
+      const audioStream = await yt.download(videoId, { type: "audio", quality: "best" });
+      const audioWs = fs.createWriteStream(audioPath);
+      for await (const chunk of audioStream) { audioWs.write(chunk); }
+      audioWs.end();
+      await new Promise(r => audioWs.on("finish", r));
+
+      // Merge with ffmpeg
+      await new Promise((resolve, reject) => {
+        ffmpeg().input(videoPath).input(audioPath).output(dest)
+          .outputOptions(["-c:v", "copy", "-c:a", "aac", "-shortest"])
+          .on("end", resolve).on("error", reject).run();
+      });
+
+      try { fs.unlinkSync(videoPath); } catch {}
+      try { fs.unlinkSync(audioPath); } catch {}
+
+      if (fs.existsSync(dest) && fs.statSync(dest).size > 50000) {
+        console.log(`✅ YouTube.js merged download success (${(fs.statSync(dest).size / 1024 / 1024).toFixed(1)}MB)`);
+        return dest;
+      }
+      throw new Error("Merged download produced empty file");
+    }
+
+    throw new Error("No suitable format found");
   }
 
-  const formats = [...(streamingData.formats || []), ...(streamingData.adaptive_formats || [])];
+  console.log(`📥 YouTube.js: downloading ${format.height || "?"}p (${format.mime_type})...`);
 
-  // Prefer: combined mp4 stream (has both video+audio), highest quality
-  let best = formats
-    .filter(f => f.url && f.mime_type?.includes("video/mp4") && f.has_audio && f.has_video)
-    .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+  // Download using YouTube.js built-in stream (handles deciphering)
+  const stream = await yt.download(videoId, { type: "video+audio", quality: "best" });
 
-  // Fallback: any combined stream
-  if (!best) {
-    best = formats
-      .filter(f => f.url && f.has_audio && f.has_video)
-      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+  const ws = fs.createWriteStream(dest);
+  for await (const chunk of stream) {
+    ws.write(chunk);
   }
-
-  // Fallback: best video-only + download separately
-  if (!best) {
-    best = formats
-      .filter(f => f.url && f.has_video)
-      .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-  }
-
-  if (!best || !best.url) {
-    const availableTypes = formats.map(f => `${f.mime_type} ${f.has_video ? 'V' : ''}${f.has_audio ? 'A' : ''} ${f.height || '?'}p url:${!!f.url}`).join(", ");
-    throw new Error(`No downloadable stream found. Available: ${availableTypes.slice(0, 200)}`);
-  }
-
-  console.log(`📥 YouTube.js: downloading ${best.height || "?"}p (${best.mime_type})...`);
-
-  // Download the stream
-  await new Promise((resolve, reject) => {
-    const download = (dlUrl) => {
-      const mod = dlUrl.startsWith("https") ? https : http;
-      mod.get(dlUrl, { timeout: 300000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } }, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          return download(res.headers.location);
-        }
-        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-        const ws = fs.createWriteStream(dest);
-        res.pipe(ws);
-        ws.on("finish", () => { ws.close(); resolve(); });
-        ws.on("error", reject);
-      }).on("error", reject);
-    };
-    download(best.url);
-  });
+  ws.end();
+  await new Promise(r => ws.on("finish", r));
 
   if (fs.existsSync(dest) && fs.statSync(dest).size > 50000) {
-    console.log(`✅ YouTube.js download success (${best.height}p, ${(fs.statSync(dest).size / 1024 / 1024).toFixed(1)}MB)`);
+    console.log(`✅ YouTube.js download success (${format.height}p, ${(fs.statSync(dest).size / 1024 / 1024).toFixed(1)}MB)`);
 
     // If not mp4, convert
-    if (!best.mime_type?.includes("mp4")) {
+    if (!format.mime_type?.includes("mp4")) {
       const mp4Path = dest.replace(/\.[^.]+$/, ".mp4");
       await new Promise((resolve, reject) => {
         ffmpeg(dest).output(mp4Path)
