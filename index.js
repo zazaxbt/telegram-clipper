@@ -468,27 +468,70 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
     });
     report += `\nyt-dlp version: ${ver}\n`;
 
-    // Also list available formats for this video
+    // Check cookies file
+    const cookiesPath = path.join(__dirname, "cookies.txt");
+    const cookiesExist = fs.existsSync(cookiesPath);
+    const cookiesSize = cookiesExist ? fs.statSync(cookiesPath).size : 0;
+    report += `Cookies: ${cookiesExist ? `yes (${cookiesSize} bytes)` : "NOT FOUND"}\n`;
+
+    // List available formats WITH stderr to see the actual error
     if (ytId) {
+      await updateProgress(chatId, statusMsg.message_id, report + "\n▶️ Listing formats...");
       try {
-        const formats = await new Promise((resolve, reject) => {
-          const proc = spawn("yt-dlp", ["--list-formats", testUrl, "--no-warnings"], { stdio: ["pipe", "pipe", "pipe"] });
-          let out = "";
+        const fmtArgs = ["--list-formats", testUrl, "--no-warnings", "-v"];
+        if (cookiesExist) fmtArgs.push("--cookies", cookiesPath);
+        const { stdout: fmtOut, stderr: fmtErr } = await new Promise((resolve, reject) => {
+          const proc = spawn("yt-dlp", fmtArgs, { stdio: ["pipe", "pipe", "pipe"] });
+          let out = "", err = "";
           proc.stdout.on("data", (d) => { out += d; });
-          proc.stderr.on("data", () => {});
-          proc.on("close", () => resolve(out));
+          proc.stderr.on("data", (d) => { err += d; });
+          proc.on("close", () => resolve({ stdout: out, stderr: err }));
           proc.on("error", reject);
-          setTimeout(() => { proc.kill(); resolve("timeout"); }, 30000);
+          setTimeout(() => { proc.kill(); resolve({ stdout: "timeout", stderr: "" }); }, 30000);
         });
-        const lines = formats.split("\n").filter(l => l.includes("mp4") || l.includes("webm") || l.includes("ID")).slice(0, 10);
-        report += `\n📋 Formats:\n${lines.join("\n").slice(0, 500)}\n`;
-      } catch {}
+        const lines = fmtOut.split("\n").filter(l => l.trim()).slice(0, 15);
+        report += `\n📋 Formats (${lines.length} lines):\n${lines.join("\n").slice(0, 600)}\n`;
+        // Show relevant stderr lines
+        const errLines = fmtErr.split("\n").filter(l => l.includes("ERROR") || l.includes("Sign in") || l.includes("bot") || l.includes("available") || l.includes("Extracting")).slice(0, 5);
+        if (errLines.length) report += `\n⚠️ yt-dlp stderr:\n${errLines.join("\n").slice(0, 400)}\n`;
+      } catch (e) {
+        report += `\n❌ Format list error: ${e.message}\n`;
+      }
+
+      // Try a direct download test (no format flags, just raw)
+      await updateProgress(chatId, statusMsg.message_id, report + "\n▶️ Test downloading...");
+      try {
+        const testDest = path.join(TEMP_DIR, `debug_test_${Date.now()}.%(ext)s`);
+        const dlArgs = [testUrl, "-o", testDest, "--no-warnings"];
+        if (cookiesExist) dlArgs.push("--cookies", cookiesPath);
+        const { stderr: dlErr } = await new Promise((resolve, reject) => {
+          const proc = spawn("yt-dlp", dlArgs, { stdio: ["pipe", "pipe", "pipe"] });
+          let err = "";
+          proc.stdout.on("data", () => {});
+          proc.stderr.on("data", (d) => { err += d; });
+          proc.on("close", (code) => resolve({ code, stderr: err }));
+          proc.on("error", reject);
+          setTimeout(() => { proc.kill(); resolve({ code: -1, stderr: "timeout" }); }, 60000);
+        });
+        // Check if file was created
+        const testFiles = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith("debug_test_"));
+        if (testFiles.length > 0) {
+          const sz = (fs.statSync(path.join(TEMP_DIR, testFiles[0])).size / 1024 / 1024).toFixed(1);
+          report += `\n✅ yt-dlp download worked! ${sz}MB (${testFiles[0]})\n`;
+          testFiles.forEach(f => { try { fs.unlinkSync(path.join(TEMP_DIR, f)); } catch {} });
+        } else {
+          const errLines = dlErr.split("\n").filter(l => l.includes("ERROR") || l.includes("Sign") || l.includes("bot")).slice(0, 3);
+          report += `\n❌ yt-dlp download failed:\n${errLines.join("\n").slice(0, 300) || dlErr.slice(0, 300)}\n`;
+        }
+      } catch (e) {
+        report += `\n❌ Download test error: ${e.message}\n`;
+      }
     }
   } catch {
     report += "\n❌ yt-dlp not installed\n";
   }
 
-  await updateProgress(chatId, statusMsg.message_id, report);
+  await updateProgress(chatId, statusMsg.message_id, report.slice(0, 4000));
 });
 
 bot.onText(/\/status/, (msg) => {
