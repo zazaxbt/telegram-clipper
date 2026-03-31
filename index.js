@@ -85,7 +85,8 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
 // Ensure yt-dlp can find node for YouTube JS challenge solving
 const YTDLP_ENV = {
   ...process.env,
-  PATH: `/usr/local/bin:/usr/bin:/bin:${process.env.PATH || ""}`,
+  PATH: `/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:${process.env.PATH || ""}`,
+  YTDLP_JSC_PROVIDER: "node",
 };
 
 // GramJS client for large file downloads (up to 2GB)
@@ -473,6 +474,26 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
       proc.on("error", reject);
     });
     report += `\nyt-dlp version: ${ver}\n`;
+
+    // Check if node is findable by yt-dlp
+    try {
+      const nodePath = await new Promise((resolve, reject) => {
+        const proc = spawn("which", ["node"], { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
+        let out = "";
+        proc.stdout.on("data", (d) => { out += d; });
+        proc.on("close", () => resolve(out.trim()));
+        proc.on("error", () => resolve("not found"));
+      });
+      const nodeVer = await new Promise((resolve, reject) => {
+        const proc = spawn("node", ["--version"], { stdio: ["pipe", "pipe", "pipe"], env: YTDLP_ENV });
+        let out = "";
+        proc.stdout.on("data", (d) => { out += d; });
+        proc.on("close", () => resolve(out.trim()));
+        proc.on("error", () => resolve("error"));
+      });
+      report += `Node: ${nodePath} (${nodeVer})\n`;
+      report += `PATH: ${(YTDLP_ENV.PATH || "").slice(0, 100)}\n`;
+    } catch {}
 
     // Check cookies file
     const cookiesPath = path.join(__dirname, "cookies.txt");
@@ -2822,7 +2843,7 @@ async function downloadWithYtdlpOnly(url, chatId) {
     "-o", path.join(TEMP_DIR, `${basename}.%(ext)s`),
     "--no-check-certificates",
     "--no-warnings",
-    // No format flags, no merge-output-format — just get whatever is available
+    "--extractor-args", "youtube:player_client=web_creator,mediaconnect",
   ];
 
   const cookiesPath = path.join(__dirname, "cookies.txt");
