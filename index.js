@@ -917,7 +917,7 @@ bot.onText(/^\/clip(?:\s+(\d+))?$/, async (msg, match) => {
       `⠹ Scoring highlights...`
     );
 
-    const highlights = scoreSegments(scenes, audioPeaks, duration, session.clipCount, session.clipDuration);
+    const highlights = scoreSegments(scenes, audioPeaks, duration, session.clipCount || 3, session.clipDuration || 30);
 
     if (highlights.length === 0) {
       return updateProgress(chatId, mid, "❌ No highlights found. Try /cut manually.");
@@ -1038,7 +1038,7 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
     return bot.sendMessage(chatId, "Send a video first.");
   }
 
-  const clipDuration = match[1] ? parseInt(match[1]) : session.clipDuration;
+  const clipDuration = match[1] ? parseInt(match[1]) : (session.clipDuration || 30);
 
   if (processingLock) {
     return bot.sendMessage(chatId, "⏳ Another video is being processed. Please wait...");
@@ -1119,7 +1119,7 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
         didJumpCut = await jumpCutClip(outPath, jumpCutPath);
         if (didJumpCut && fs.existsSync(jumpCutPath)) fs.unlinkSync(outPath);
         else try { fs.unlinkSync(jumpCutPath); } catch {}
-      } catch { try { fs.unlinkSync(jumpCutPath); } catch {} }
+      } catch (jcErr) { console.error("Q&A jump cut failed:", jcErr.message); try { fs.unlinkSync(jumpCutPath); } catch {} }
       const editedQA = didJumpCut && fs.existsSync(jumpCutPath) ? jumpCutPath : outPath;
 
       const captionedPath = path.join(TEMP_DIR, `qa_captioned_${chatId}_${i}.mp4`);
@@ -1139,7 +1139,7 @@ bot.onText(/\/qaclip(?:\s+(\d+))?$/, async (msg, match) => {
         console.error("Q&A auto-caption failed:", capErr.message);
         try { fs.unlinkSync(captionedPath); } catch {}
         await sendVideoSmart(chatId, editedQA, { caption: caption.slice(0, 1024) });
-        try { fs.unlinkSync(outPath); } catch {}
+        try { fs.unlinkSync(editedQA); } catch {}
       }
     }
 
@@ -1767,73 +1767,18 @@ bot.onText(/^\/caption$/, async (msg) => {
   if (isBlocked(msg)) return;
   if (!session || !session.videoPath) return bot.sendMessage(chatId, "Send a video first.");
   try {
-    const statusMsg = await bot.sendMessage(chatId, "🎤 Generating AI captions...\n\n📊 Extracting & transcribing in chunks...");
-    const videoDuration = await getVideoDuration(session.videoPath);
-    const CHUNK_MINS = 5;
-    const CHUNK_SECS = CHUNK_MINS * 60;
-    const totalChunks = Math.ceil(videoDuration / CHUNK_SECS);
-
-    let chunks = [];
-    for (let c = 0; c < totalChunks; c++) {
-      const offset = c * CHUNK_SECS;
-      await updateProgress(chatId, statusMsg.message_id,
-        `🎤 Generating AI captions...\n\n📊 Chunk ${c + 1}/${totalChunks}: ${formatTime(offset)} - ${formatTime(Math.min(offset + CHUNK_SECS, videoDuration))}`
-      );
-      const wavPath = path.join(TEMP_DIR, `caption_audio_${chatId}_${c}.wav`);
-      await new Promise((resolve, reject) => {
-        ffmpeg(session.videoPath).output(wavPath)
-          .outputOptions(["-ss", String(offset), "-t", String(CHUNK_SECS), "-ar", "16000", "-ac", "1", "-f", "wav"])
-          .on("end", resolve).on("error", reject).run();
-      });
-      try {
-        const { chunks: wChunks } = await transcribeWithWhisper(wavPath);
-        for (const chunk of wChunks) { chunk.timestamp[0] += offset; chunk.timestamp[1] += offset; }
-        chunks = chunks.concat(wChunks);
-      } catch (err) {
-        await updateProgress(chatId, statusMsg.message_id, `⚠️ Chunk ${c + 1} failed: ${err.message}. Continuing...`);
-      }
-      try { fs.unlinkSync(wavPath); } catch {}
-    }
-
-    if (!chunks || chunks.length === 0) {
-      return updateProgress(chatId, statusMsg.message_id, "❌ No speech detected in the video.");
-    }
-
-    await updateProgress(chatId, statusMsg.message_id, `🎤 Generating AI captions...\n\n📊 Step 3/3: Burning ${chunks.length} subtitles onto video...`);
-
-    // Generate ASS subtitle file (CapCut style)
-    const assPath = path.join(TEMP_DIR, `subs_${chatId}.ass`);
-    let assContent = `[Script Info]
-ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,72,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,60,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-
-    for (const chunk of chunks) {
-      const startTime = formatASSTime(chunk.timestamp[0]);
-      const endTime = formatASSTime(chunk.timestamp[1]);
-      const text = chunk.text.replace(/\n/g, "\\N");
-      assContent += `Dialogue: 0,${startTime},${endTime},Default,,0,0,0,,${text}\n`;
-    }
-    fs.writeFileSync(assPath, assContent);
-
+    await bot.sendMessage(chatId, "🎤 Generating Submagic-style captions...\n📊 Transcribing with Whisper (word-level timestamps)...");
     const outPath = path.join(TEMP_DIR, `captioned_${chatId}.mp4`);
-    await new Promise((resolve, reject) => {
-      ffmpeg(session.videoPath).output(outPath)
-        .outputOptions(["-vf", `ass=${assPath}`, "-c:a", "copy", "-preset", "ultrafast"])
-        .on("end", resolve).on("error", reject).run();
-    });
-
-    await sendVideoSmart(chatId, outPath, { caption: `🎤 Auto-captioned (${chunks.length} segments)` });
-    [outPath, assPath].forEach(f => { try { fs.unlinkSync(f); } catch {} });
-    await updateProgress(chatId, statusMsg.message_id, `✅ Captions added! ${chunks.length} segments burned onto video.`);
-  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+    const segCount = await autoCaptionClip(session.videoPath, outPath);
+    if (segCount === 0) {
+      return bot.sendMessage(chatId, "❌ No speech detected in the video.");
+    }
+    await sendVideoSmart(chatId, outPath, { caption: `🎤 Auto-captioned (${segCount} segments)` });
+    try { fs.unlinkSync(outPath); } catch {}
+  } catch (err) {
+    console.error("/caption failed:", err);
+    bot.sendMessage(chatId, `❌ Error: ${err.message}`);
+  }
 });
 
 // /musiclib - Browse and add royalty-free music
@@ -2328,8 +2273,8 @@ bot.onText(/^\/autozoom$/, async (msg) => {
         .on("end", resolve).on("error", reject).run();
     });
     await sendVideoSmart(chatId, outPath, { caption: `🔍 Auto-zoom applied (${topPeaks.length} peak moments)` });
-    fs.unlinkSync(outPath);
-  } catch (err) { bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
+    try { fs.unlinkSync(outPath); } catch {}
+  } catch (err) { console.error("/autozoom failed:", err); bot.sendMessage(chatId, `❌ Error: ${err.message}`); }
 });
 
 // /broll - Insert stock footage B-roll from Pexels
@@ -2624,13 +2569,18 @@ async function autoCaptionClip(videoPath, outPath) {
   let result;
   try {
     result = await transcribeWithWhisper(wavPath);
-  } finally {
+  } catch (err) {
     try { fs.unlinkSync(wavPath); } catch {}
+    console.error("autoCaptionClip transcribe failed:", err.message);
+    fs.copyFileSync(videoPath, outPath);
+    return 0;
   }
+  try { fs.unlinkSync(wavPath); } catch {}
 
-  const { chunks, words } = result;
+  const chunks = result?.chunks || [];
+  const words = result?.words || [];
 
-  if (!chunks || chunks.length === 0) {
+  if (chunks.length === 0) {
     fs.copyFileSync(videoPath, outPath);
     return 0;
   }
@@ -2640,6 +2590,7 @@ async function autoCaptionClip(videoPath, outPath) {
   let allWords = [];
   if (words && words.length > 0) {
     for (const w of words) {
+      if (!w || typeof w.word !== "string") continue;
       const clean = w.word.toUpperCase().replace(/[{}\\]/g, "").trim();
       if (clean.length === 0) continue;
       allWords.push({ word: clean, start: w.start, end: w.end });
