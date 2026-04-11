@@ -435,7 +435,9 @@ bot.onText(/\/debug(?:\s+(.+))?$/, async (msg, match) => {
   const chatId = msg.chat.id;
   if (String(chatId) !== String(ADMIN_ID)) return bot.sendMessage(chatId, "Admin only.");
 
-  const testUrl = match[1] || "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  // Strip angle brackets, whitespace, and Telegram markdown from URL
+  const rawUrl = match[1] || "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+  const testUrl = rawUrl.trim().replace(/^[<[(]+|[>\])]+$/g, "");
   const ytId = extractYouTubeId(testUrl);
 
   const statusMsg = await bot.sendMessage(chatId, `🔍 Debug: ${testUrl}\nYT ID: ${ytId || "not YouTube"}\n\nTesting...`);
@@ -748,7 +750,8 @@ const socialPattern = /^(https?:\/\/\S*(youtube\.com|youtu\.be|twitter\.com|x\.c
 bot.onText(socialPattern, async (msg, match) => {
   if (isBlocked(msg)) return;
   const chatId = msg.chat.id;
-  const url = match[1];
+  // Strip angle brackets, whitespace, and trailing punctuation
+  const url = (match[1] || "").trim().replace(/^[<[(]+|[>\])]+$/g, "");
 
   try {
     const dlMsg = await bot.sendMessage(chatId, "⬇️ Downloading video...");
